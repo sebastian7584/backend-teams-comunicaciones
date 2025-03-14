@@ -12,6 +12,7 @@ from django.contrib.auth import login, authenticate
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ObjectDoesNotExist
 from sqlControl.sqlControl import Sql_conexion
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError, DecodeError
 from django.db import IntegrityError
 from django.utils import timezone
 from . import models
@@ -1883,6 +1884,7 @@ def translate_prepago(requests):
                 data.append(temp_data)
             # print(cabecera)
         return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
+    
 @api_view(['PUT', 'POST'])
 def lista_productos_prepago_equipo(requests):
     if requests.method == 'POST':
@@ -1914,130 +1916,143 @@ def lista_productos_prepago_equipo(requests):
 
 
 @api_view(['PUT', 'POST'])
-def lista_productos_prepago(requests):
-    if requests.method == 'PUT':
-        traduccion = {
-            'Precio publico':'Precio Publico',
-            'Precio sub':'Subdistribuidor',
-            'Precio premium':'Premium',
-            'Precio Fintech':'Fintech Zonificacion Subdistribuidores Y Externos',
-            'Precio Addi':'Addi',
-            'Precio Flamingo':'Flamingo',
-            'Precio Adelantos Valle':'Precio Adelantos Valle',
-            'Costo':'Costo',
-        }
-        lista_precios = []
-        token = requests.data['jwt']
-        payload = jwt.decode(token, 'secret', algorithms='HS256')
-        usuario = User.objects.get(username=payload['id'])
-        listas = models.Permisos_usuarios_precio.objects.filter(user= usuario.id)
-        for i in listas:
-            permiso = i.permiso.permiso
-            print(permiso)
-            lista_precios.append({'id':permiso, 'nombre':traduccion[permiso]})
-        
+def lista_productos_prepago(request):
+    if request.method == 'PUT':
+        try:
+            # Validar si el token fue enviado
+            if 'jwt' not in request.data:
+                return Response({'error': 'Token no proporcionado'}, status=400)
 
-        return Response({'data' : lista_precios})
-    
-    if requests.method == 'POST':   
-        new_data = []
-        productos = []
-        precio = requests.data['precio']
-        
+            token = request.data['jwt']
 
-        data = models.Lista_precio.objects.all()
-        df = pd.DataFrame(list(data.values()))
-        df['dia'] = pd.to_datetime(df['dia'])
-        df['valor'] = df['valor'].astype(float)
+            # Decodificar el token
+            try:
+                payload = jwt.decode(token, 'secret', algorithms='HS256')
+            except ExpiredSignatureError:
+                return Response({'error': 'Token expirado'}, status=401)
+            except InvalidTokenError:
+                return Response({'error': 'Token inválido'}, status=401)
+            except DecodeError:
+                return Response({'error': 'Error al decodificar el token'}, status=400)
 
-        df_descuentos = df[df['nombre'] == 'descuento']
-        df_descuentos = df_descuentos.sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).reset_index(drop=True)
-        df_descuentos = df_descuentos.rename(columns={'valor': 'descuento'})
+            usuario = User.objects.filter(username=payload.get('id')).first()
+            if not usuario:
+                return Response({'error': 'Usuario no encontrado'}, status=404)
 
-        df_filtrado = df[df['nombre'] == precio]
-        
-        df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        
-        df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
+            # Mapeo de nombres de precios
+            traduccion = {
+                'Precio publico': 'Precio Publico',
+                'Precio sub': 'Subdistribuidor',
+                'Precio premium': 'Premium',
+                'Precio Fintech': 'Fintech Zonificacion Subdistribuidores Y Externos',
+                'Precio Addi': 'Addi',
+                'Precio Flamingo': 'Flamingo',
+                'Precio Adelantos Valle': 'Precio Adelantos Valle',
+                'Costo': 'Costo',
+            }
 
-        df_kit_addi = df[df['nombre'] == 'Kit Addi']
-        df_kit_addi = df_kit_addi.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_addi = df_kit_addi.rename(columns={'valor': 'kit addi'})
-        df_resultado = pd.merge(df_resultado, df_kit_addi[['producto', 'kit addi']], on='producto', how='left')
+            # Obtener los permisos de precios del usuario
+            listas = models.Permisos_usuarios_precio.objects.filter(user=usuario.id)
+            lista_precios = [{'id': i.permiso.permiso, 'nombre': traduccion.get(i.permiso.permiso, i.permiso.permiso)} for i in listas]
 
-        df_kit_fintech = df[df['nombre'] == 'Kit Fintech']
-        df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_fintech = df_kit_fintech.rename(columns={'valor': 'kit fintech'})
-        df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
-        
-        
-        df_kit_valle = df[df['nombre'] == 'Kit Valle']
-        df_kit_valle = df_kit_valle.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_valle = df_kit_valle.rename(columns={'valor': 'kit valle'})
-        df_resultado = pd.merge(df_resultado, df_kit_valle[['producto', 'kit valle']], on='producto', how='left')
+            return Response({'data': lista_precios})
 
+        except Exception as e:
+            return Response({'error': f'Error interno: {str(e)}'}, status=500)
 
-        df_kit_sub = df[df['nombre'] == 'Kit Sub']
-        df_kit_sub = df_kit_sub.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_sub = df_kit_sub.rename(columns={'valor': 'kit sub'})
-        df_resultado = pd.merge(df_resultado, df_kit_sub[['producto', 'kit sub']], on='producto', how='left')
+    elif request.method == 'POST':
+        try:
+            precio = request.data.get('precio')
+            if not precio:
+                return Response({'error': 'El campo "precio" es obligatorio'}, status=400)
 
-        df_costo = df[df['nombre'] == 'Costo']
-        df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_costo = df_costo.rename(columns={'valor': 'costo'})
-        df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
-        
+            # Obtener datos de la base de datos
+            data = models.Lista_precio.objects.all()
+            df = pd.DataFrame(list(data.values()))
 
+            if df.empty:
+                return Response({'data': []})
 
-        sim = 2000
-        base = 1095578
+            df['dia'] = pd.to_datetime(df['dia'])
+            df['valor'] = df['valor'].astype(float)
 
-        for index, row in df_resultado.iterrows():
-            if precio == 'Costo':
-                tem_data = {
-                    'equipo': row['producto'],
-                    'costo': '${:,.2f}'.format(row['costo']),
-                    'descuento': '${:,.2f}'.format(row['descuento']),
-                    'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
-                }
-                new_data.append(tem_data)
-            else:
-                valor = row['valor']
-                iva = row['valor'] * 0.19 if row['valor'] >= base else 0
-                total = sim * 1.19 + valor + iva
-                tem_data = {
-                    'equipo': row['producto'],
-                    'precio simcard': '${:,.2f}'.format(sim),
-                    'IVA simcard': '${:,.2f}'.format(sim * 0.19),
-                    'equipo sin IVA': '${:,.2f}'.format(valor),
-                    'IVA equipo': '${:,.2f}'.format(iva),
-                }
-                if precio == 'Precio sub':
-                    kit = row['kit sub']
-                    tem_data['KIT'] = kit
-                    total = total + kit
-                elif precio == 'Precio Fintech':
-                    kit = row['kit fintech']
-                    tem_data['KIT'] = kit
-                    total = total + kit
-                elif precio == 'Precio Addi':
-                    kit = row['kit addi']
-                    tem_data['KIT'] = kit
-                    total = total + kit
-                elif precio == 'Precio Adelantos Valle':
-                    kit = row['kit valle']
-                    tem_data['KIT'] = kit
-                    total = total + kit
-                
-                tem_data['total'] = '${:,.2f}'.format(total)
-                if precio == 'Precio publico':
-                    tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
-                new_data.append(tem_data)
+            # Filtros de productos y descuentos
+            df_descuentos = df[df['nombre'] == 'descuento'].sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).rename(columns={'valor': 'descuento'})
 
-        position = {1:'up', 2: 'down', 3: 'neutral'}
-        new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
+            df_precio = df[df['nombre'] == precio].sort_values('dia', ascending=False).drop_duplicates('producto')
+            df_precio = pd.merge(df_precio, df_descuentos[['producto', 'descuento']], on='producto', how='left')
 
-        return Response({'data' : new_data})
+            # Agregar kits según el tipo de precio
+            kits = ['Kit Addi', 'Kit Fintech', 'Kit Valle', 'Kit Sub']
+            kit_nombres = ['kit addi', 'kit fintech', 'kit valle', 'kit sub']
+
+            for kit, kit_nombre in zip(kits, kit_nombres):
+                df_kit = df[df['nombre'] == kit].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': kit_nombre})
+                df_precio = pd.merge(df_precio, df_kit[['producto', kit_nombre]], on='producto', how='left')
+
+            df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': 'costo'})
+            df_precio = pd.merge(df_precio, df_costo[['producto', 'costo']], on='producto', how='left')
+
+            # Variables fijas
+            sim = 2000
+            base = 1095578
+            new_data = []
+
+            for _, row in df_precio.iterrows():
+                if precio == 'Costo':
+                    new_data.append({
+                        'equipo': row['producto'],
+                        'costo': '${:,.2f}'.format(row['costo']),
+                        'descuento': '${:,.2f}'.format(row['descuento']),
+                        'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
+                    })
+                else:
+                    valor = row['valor']
+                    iva = valor * 0.19 if valor >= base else 0
+                    total = sim * 1.19 + valor + iva
+
+                    tem_data = {
+                        'equipo': row['producto'],
+                        'precio simcard': '${:,.2f}'.format(sim),
+                        'IVA simcard': '${:,.2f}'.format(sim * 0.19),
+                        'equipo sin IVA': '${:,.2f}'.format(valor),
+                        'IVA equipo': '${:,.2f}'.format(iva),
+                    }
+
+                    # Asignar KIT según el precio
+                    if precio == 'Precio sub':
+                        kit = row['kit sub']
+                    elif precio == 'Precio Fintech':
+                        kit = row['kit fintech']
+                    elif precio == 'Precio Addi':
+                        kit = row['kit addi']
+                    elif precio == 'Precio Adelantos Valle':
+                        kit = row['kit valle']
+                    else:
+                        kit = 0
+
+                    if kit:
+                        tem_data['KIT'] = '${:,.2f}'.format(kit)
+                        total += kit
+
+                    tem_data['total'] = '${:,.2f}'.format(total)
+
+                    # Promo si hay descuento
+                    if precio == 'Precio publico' and row['descuento'] > 0:
+                        tem_data['Promo'] = 'PROMO'
+                    else:
+                        tem_data['Promo'] = 'NO'
+
+                    new_data.append(tem_data)
+
+            # Variación aleatoria en precios
+            position = {1: 'up', 2: 'down', 3: 'neutral'}
+            new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
+
+            return Response({'data': new_data})
+
+        except Exception as e:
+            return Response({'error': f'Error interno: {str(e)}'}, status=500)
 
 class UpdatePrices:
 
