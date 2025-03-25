@@ -617,44 +617,55 @@ def select_datos_corresponsal(request):
     else:
         fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
         fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+    
+    # Consulta de transacciones en el rango de fechas
     transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
     transacciones_data = []
     for t in transacciones:
-            transacciones_data.append({
-                'establecimiento': t.establecimiento,
-                'codigo_aval': t.codigo_aval,
-                'codigo_incocredito': t.codigo_incocredito,
-                'terminal': t.terminal,
-                'fecha': t.fecha.strftime('%d/%m/%Y'),
-                'hora': t.hora,
-                'nombre_convenio': t.nombre_convenio,
-                'operacion': t.operacion,
-                'fact_cta': t.fact_cta,
-                'cod_aut': t.cod_aut,
-                'valor': t.valor,
-                'nura': t.nura,
-                'esquema': t.esquema,
-                'numero_tarjeta': t.numero_tarjeta,
-                'comision': t.comision,
-            })
+        transacciones_data.append({
+            'establecimiento': t.establecimiento,
+            'codigo_aval': t.codigo_aval,
+            'codigo_incocredito': t.codigo_incocredito,
+            'terminal': t.terminal,
+            'fecha': t.fecha.strftime('%d/%m/%Y'),
+            'hora': t.hora,
+            'nombre_convenio': t.nombre_convenio,
+            'operacion': t.operacion,
+            'fact_cta': t.fact_cta,
+            'cod_aut': t.cod_aut,
+            'valor': t.valor,
+            'nura': t.nura,
+            'esquema': t.esquema,
+            'numero_tarjeta': t.numero_tarjeta,
+            'comision': t.comision,
+        })
+    
+    # Consulta de sucursales
     sucursales = models.Codigo_oficina.objects.all()
     cod_sucursales = {i.codigo: i.terminal for i in sucursales} 
-    sucursales_dict = [{'value':i.codigo,'text':i.terminal} for i in sucursales]
+    sucursales_dict = [{'value': i.codigo, 'text': i.terminal} for i in sucursales]
+    
+    # Procesamiento de datos de transacciones
     df_transacciones = pd.DataFrame(transacciones_data)
     df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales)
     df_transacciones['cuenta'] = 1
-    df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({'cuenta':'sum', 'valor':'sum'}).reset_index()
+    df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({'cuenta': 'sum', 'valor': 'sum'}).reset_index()
+    
     if tamaño_fecha == 7:
         fecha_inicio = timezone.make_aware(fecha_inicio, timezone.get_current_timezone())
         fecha_fin = timezone.make_aware(fecha_fin, timezone.get_current_timezone())
+    
+    # Consulta de consignaciones
     consignaciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
     consignaciones_data = []
     for i in consignaciones:
-            consignaciones_data.append({
-                'codigo_incocredito': i.codigo_incocredito,
-                'estado': i.estado,
-                'valor': i.valor,
-            })
+        consignaciones_data.append({
+            'codigo_incocredito': i.codigo_incocredito,
+            'estado': i.estado,
+            'valor': i.valor,
+        })
+    
+    # Procesamiento de datos de consignaciones
     if len(consignaciones_data) > 0:
         df_consignaciones = pd.DataFrame(consignaciones_data)
         df_consignaciones = df_consignaciones.pivot_table(
@@ -672,8 +683,10 @@ def select_datos_corresponsal(request):
         df_consolidado['pendiente'] = df_consolidado['pendiente'].apply(lambda x: f"${x:,.2f}")
     if 'saldado' in df_consolidado.columns:
         df_consolidado['saldado'] = df_consolidado['saldado'].apply(lambda x: f"${x:,.2f}")
+    
     consolidado = df_consolidado.to_dict(orient='records')
     data_excel = [i | {'sucursal': cod_sucursales[i['codigo_incocredito']]} for i in transacciones_data]
+    
     return Response({'consolidado': consolidado, 'sucursales': sucursales_dict, 'data': data_excel })
 
 @api_view(['POST'])
