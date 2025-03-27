@@ -16,6 +16,7 @@ from jwt.exceptions import ExpiredSignatureError, InvalidTokenError, DecodeError
 from django.db import IntegrityError
 from django.utils import timezone
 from . import models
+from . import models
 import jwt, datetime
 import json
 import pandas as pd
@@ -744,12 +745,12 @@ def select_datos_corresponsal_cajero(request):
 def guardar_datos_corresponsal(request):
     cabecera = request.data['cabecera']
     items = request.data['items']
-    df =pd.DataFrame(items, columns=cabecera)
+    df = pd.DataFrame(items, columns=cabecera)
     df.fillna("", inplace=True)
     df['valor'] = df['valor'].replace("", "0").astype(int)
     df['nura'] = df['nura'].replace("", "0").astype(int)
     df['comision'] = df['comision'].replace("", "0").astype(int)
-    # df['fecha'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y')
+    
     fecha_min = df['fecha'].min()
     fecha_max = df['fecha'].max()
     try:
@@ -758,86 +759,47 @@ def guardar_datos_corresponsal(request):
     except:
         fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ'))
         fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ'))
-    try:
-        transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_minima, fecha_maxima))
-        transacciones_data = []
-        for t in transacciones:
-            valor = t.valor if t.operacion != 'Retiro' else - t.valor
-            if t.operacion == 'Retiro':
-                pass
-            transacciones_data.append({
-                'establecimiento': t.establecimiento,
-                'codigo_aval': t.codigo_aval,
-                'codigo_incocredito': t.codigo_incocredito,
-                'terminal': t.terminal,
-                'fecha': t.fecha.strftime('%d/%m/%Y'),
-                'hora': t.hora,
-                'nombre_convenio': t.nombre_convenio,
-                'operacion': t.operacion,
-                'fact_cta': t.fact_cta,
-                'cod_aut': t.cod_aut,
-                'valor': valor,
-                'nura': t.nura,
-                'esquema': t.esquema,
-                'numero_tarjeta': t.numero_tarjeta,
-                'comision': t.comision,
-            })
-
-        rows_to_drop = []
-        for index, row in df.iterrows():
-            row_dict = row.to_dict()
-            if row_dict in transacciones_data:
-                # print('esta es igual ')
-                rows_to_drop.append(index)
-        df.drop(rows_to_drop, inplace=True)
-    except:
-        pass
-    transacciones = []
+    
+    duplicados_info = []
+    registros_unicos = []
+    
     for index, row in df.iterrows():
+        if models.Transacciones_sucursal.objects.filter(codigo_incocredito=row['codigo_incocredito'], fecha=row['fecha']).exists():
+            duplicados_info.append({'linea': index + 2, 'codigo_incocredito': row['codigo_incocredito']})
+        else:
+            registros_unicos.append(row.to_dict())
+    
+    transacciones = []
+    for registro in registros_unicos:
         try:
             try:
-                time_date = datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ')
+                time_date = datetime.datetime.strptime(registro['fecha'], '%Y-%m-%dT%H:%M:%S.%fZ')
             except:
-                time_date = datetime.datetime.strptime(row.fecha, "%d/%m/%Y").date()
-            establecimiento = row.establecimiento
-            codigo_aval = row.codigo_aval
-            codigo_incocredito = row.codigo_incocredito
-            terminal = row.terminal
-            fecha = time_date
-            hora = row.hora
-            nombre_convenio = row.nombre_convenio
-            operacion = row.operacion
-            fact_cta = row.fact_cta
-            cod_aut = row.cod_aut
-            valor = row.valor if row.operacion != 'Retiro' else - row.valor
-            nura = row.nura
-            esquema = row.esquema
-            numero_tarjeta = row.numero_tarjeta
-            comision = row.comision
+                time_date = datetime.datetime.strptime(registro['fecha'], "%d/%m/%Y").date()
             transacciones.append(models.Transacciones_sucursal(
-                establecimiento=establecimiento,
-                codigo_aval=codigo_aval,
-                codigo_incocredito=codigo_incocredito,
-                terminal=terminal,
-                fecha=fecha,
-                hora=hora,
-                nombre_convenio=nombre_convenio,
-                operacion=operacion,
-                fact_cta=fact_cta,
-                cod_aut=cod_aut,
-                valor=valor,
-                nura=nura,
-                esquema=esquema,
-                numero_tarjeta=numero_tarjeta,
-                comision=comision,
+                establecimiento=registro['establecimiento'],
+                codigo_aval=registro['codigo_aval'],
+                codigo_incocredito=registro['codigo_incocredito'],
+                terminal=registro['terminal'],
+                fecha=time_date,
+                hora=registro['hora'],
+                nombre_convenio=registro['nombre_convenio'],
+                operacion=registro['operacion'],
+                fact_cta=registro['fact_cta'],
+                cod_aut=registro['cod_aut'],
+                valor=registro['valor'] if registro['operacion'] != 'Retiro' else -registro['valor'],
+                nura=registro['nura'],
+                esquema=registro['esquema'],
+                numero_tarjeta=registro['numero_tarjeta'],
+                comision=registro['comision'],
             ))
         except Exception as e:
-            texto = str(e).replace("'Series' object has no attribute ","Datos no tienen columna ")
+            texto = str(e).replace("'Series' object has no attribute ", "Datos no tienen columna ")
             raise AuthenticationFailed(texto)
-        
+    
     models.Transacciones_sucursal.objects.bulk_create(transacciones)
-   
-    return Response({'mensaje':'Guardado con exito'})
+    
+    return Response({'mensaje': 'Guardado con éxito', 'duplicados': duplicados_info})
 
 @api_view(['POST'])
 def calcular_comisiones(request):
