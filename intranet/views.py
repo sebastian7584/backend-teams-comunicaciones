@@ -1,4 +1,10 @@
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.pagination import PageNumberPagination
+from django.shortcuts import get_object_or_404
+from django.db.models import Prefetch
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from django.http import JsonResponse, HttpResponse
@@ -6,17 +12,11 @@ from django.contrib.auth.models import User
 from rest_framework.decorators import api_view
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
-from rest_framework.response import Response
-from django.shortcuts import render, redirect
-from django.contrib.auth import login, authenticate
-from django.shortcuts import get_object_or_404
 from django.core.exceptions import ObjectDoesNotExist
 from sqlControl.sqlControl import Sql_conexion
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError, DecodeError
 from django.db import IntegrityError
 from django.utils import timezone
-from . import models
-from . import models
 import jwt, datetime
 import json
 import pandas as pd
@@ -29,10 +29,13 @@ import shutil
 import uuid
 import ast
 from datetime import date
-# import locale
 import string
 import base64
-import random
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+from .models import ActaEntrega, ActaObjetivo, ActaObservacion, ActaRecibidoPor, ActaArchivo
+from .serializers import ActaEntregaSerializer
+
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
@@ -124,7 +127,64 @@ def formulas_prices(request, id=None):
             else:
                 return Response({'error': 'The id field is required'}, status=400)
     except Exception as e:
-        return Response({'error': e}, status=400)   
+        return Response({'error': e}, status=400)
+    
+@api_view(['GET', 'POST', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter('Authorization', openapi.IN_HEADER, description="Token de autenticación", type=openapi.TYPE_STRING)
+    ]
+)
+def actas_entrega(request, id=None):
+    try:
+        paginator = PageNumberPagination()
+        paginator.page_size = 10
+        
+        if request.method == 'GET':
+            if id is not None:
+                acta = get_object_or_404(ActaEntrega.objects.prefetch_related(
+                    Prefetch('actaobjetivo_set'),
+                    Prefetch('actaobservacion_set'),
+                    Prefetch('actarecibidopor_set'),
+                    Prefetch('actaarchivo_set')
+                ), id=id)
+                serializer = ActaEntregaSerializer(acta)
+                return Response(serializer.data)
+            else:
+                actas = ActaEntrega.objects.all()
+                result_page = paginator.paginate_queryset(actas, request)
+                serializer = ActaEntregaSerializer(result_page, many=True)
+                return paginator.get_paginated_response(serializer.data)
+        
+        elif request.method == 'POST':
+            serializer = ActaEntregaSerializer(data=request.data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({'message': 'Acta creada exitosamente', 'data': serializer.data})
+            return Response(serializer.errors, status=400)
+        
+        elif request.method == 'PUT':
+            if id is None:
+                return Response({'error': 'ID requerido para actualizar'}, status=400)
+            acta = get_object_or_404(ActaEntrega, id=id)
+            serializer = ActaEntregaSerializer(acta, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({'message': 'Acta actualizada correctamente', 'data': serializer.data})
+            return Response(serializer.errors, status=400)
+        
+        elif request.method == 'DELETE':
+            if id is None:
+                return Response({'error': 'ID requerido para eliminar'}, status=400)
+            acta = get_object_or_404(ActaEntrega, id=id)
+            acta.delete()
+            return Response({'message': 'Acta eliminada exitosamente'})
+    
+    except Exception as e:
+        return Response({'error': str(e)}, status=400)
+
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
 def variables_prices(request, id=None):
