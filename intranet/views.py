@@ -1883,6 +1883,7 @@ def translate_prepago(requests):
                 data.append(temp_data)
             # print(cabecera)
         return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
+
 @api_view(['PUT', 'POST'])
 def lista_productos_prepago_equipo(requests):
     if requests.method == 'POST':
@@ -1912,6 +1913,15 @@ def lista_productos_prepago_equipo(requests):
 
         return Response({'data' : new_data})
 
+def calcular_variacion(row):
+    if pd.isna(row['valor_anterior']):
+        return 'neutral'
+    elif row['valor_actual'] > row['valor_anterior']:
+        return 'up'
+    elif row['valor_actual'] < row['valor_anterior']:
+        return 'down'
+    else:
+        return 'neutral'
 
 @api_view(['PUT', 'POST'])
 def lista_productos_prepago(requests):
@@ -1955,9 +1965,19 @@ def lista_productos_prepago(requests):
         df_descuentos = df_descuentos.rename(columns={'valor': 'descuento'})
 
         df_filtrado = df[df['nombre'] == precio]
+
+        df_filtrado_sorted = df_filtrado.sort_values(['producto', 'dia'], ascending=[True, False])
+        df_filtrado_sorted['rank'] = df_filtrado_sorted.groupby('producto').cumcount()
+
+        df_actual = df_filtrado_sorted[df_filtrado_sorted['rank'] == 0][['producto', 'valor']].rename(columns={'valor': 'valor_actual'})
+        df_anterior = df_filtrado_sorted[df_filtrado_sorted['rank'] == 1][['producto', 'valor']].rename(columns={'valor': 'valor_anterior'})
         
         df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+        df_variacion = pd.merge(df_actual, df_anterior, on='producto', how='left')
         
+        df_variacion['variation'] = df_variacion.apply(calcular_variacion, axis=1)
+
+
         df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
 
         df_kit_addi = df[df['nombre'] == 'Kit Addi']
@@ -1987,6 +2007,7 @@ def lista_productos_prepago(requests):
         df_costo = df_costo.rename(columns={'valor': 'costo'})
         df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
         
+        df_resultado = pd.merge(df_resultado, df_variacion[['producto', 'variation']], on='producto', how='left')
 
 
         sim = 2000
@@ -2000,6 +2021,7 @@ def lista_productos_prepago(requests):
                     'descuento': '${:,.2f}'.format(row['descuento']),
                     'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
                 }
+                tem_data['variation'] = row['variation']
                 new_data.append(tem_data)
             else:
                 valor = row['valor']
@@ -2030,12 +2052,13 @@ def lista_productos_prepago(requests):
                     total = total + kit
                 
                 tem_data['total'] = '${:,.2f}'.format(total)
+                tem_data['variation'] = row['variation']
                 if precio == 'Precio publico':
                     tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
                 new_data.append(tem_data)
 
-        position = {1:'up', 2: 'down', 3: 'neutral'}
-        new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
+        # position = {1:'up', 2: 'down', 3: 'neutral'}
+        # new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
 
         return Response({'data' : new_data})
 
