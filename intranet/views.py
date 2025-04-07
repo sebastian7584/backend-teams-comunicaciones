@@ -730,6 +730,7 @@ def select_datos_corresponsal_cajero(request):
 def guardar_datos_corresponsal(request):
     cabecera = request.data['cabecera']
     items = request.data['items']
+    print(len(items))
     df =pd.DataFrame(items, columns=cabecera)
     df.fillna("", inplace=True)
     df['valor'] = df['valor'].replace("", "0").astype(int)
@@ -1917,9 +1918,21 @@ def calcular_variacion(row):
     if pd.isna(row['valor_anterior']):
         return 'neutral'
     elif row['valor_actual'] > row['valor_anterior']:
-        return 'up'
+        dif = row['valor_actual'] - row['valor_anterior']
+        if row['valor_anterior'] > 0:
+            percentage = dif / row['valor_anterior']*100
+        else:
+            percentage = 0
+        percentage = f'{round(percentage, 2)}%'
+        return f'up-{dif}-{percentage}'
     elif row['valor_actual'] < row['valor_anterior']:
-        return 'down'
+        dif = row['valor_anterior'] - row['valor_actual']
+        if row['valor_anterior'] > 0:
+            percentage = dif / row['valor_anterior']*100
+        else:
+            percentage = 0
+        percentage = f'{round(percentage, 2)}%'
+        return f'down-{dif}-{percentage}'
     else:
         return 'neutral'
 
