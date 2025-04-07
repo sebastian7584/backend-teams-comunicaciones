@@ -506,21 +506,36 @@ def consignacion_corresponsal(request):
         token = request.data['jwt']
         image = request.FILES['image']
         sucursal = request.data['sucursal']
-        # sucursal_id = models.Codigo_oficina.objects.get(codigo=sucursal)
         consignacion_data = json.loads(request.POST.get('data'))
+        fecha_consignacion = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date()
+
+        # Validación del usuario
         payload = jwt.decode(token, 'secret', algorithms='HS256')
         usuario = User.objects.get(username=payload['id'])
-        print(usuario.id)
+
+        # VALIDACIÓN CONTRA CUADRE
+        try:
+            cuadre = models.CuadreCaja.objects.get(fecha=fecha_consignacion, sucursal=sucursal)
+        except models.CuadreCaja.DoesNotExist:
+            return Response({'detail': 'No hay cuadre para esa fecha y sucursal'}, status=400)
+
+        valor_nuevo = consignacion_data.get('valor')
+        consignaciones_previas = models.Corresponsal_consignacion.objects.filter(
+            fecha=fecha_consignacion, codigo_incocredito=sucursal
+        )
+        valor_consignado = sum(t.valor for t in consignaciones_previas)
+        disponible_actual = cuadre.total_disponible - valor_consignado
+
+        if valor_nuevo > disponible_actual:
+            return Response({'detail': 'El valor excede el monto disponible del cuadre'}, status=400)
+
+        # AUTENTICACIÓN CON MICROSOFT GRAPH
         tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
         client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
         client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
-
         url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
-
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
         data2 = {
             'grant_type': 'client_credentials',
             'client_id': client_id,
@@ -533,32 +548,36 @@ def consignacion_corresponsal(request):
         if response.status_code == 200:
             access_token = response.json().get('access_token')
         else:
-            raise AuthenticationFailed(f"Error getting access token")
-        
+            raise AuthenticationFailed("Error al obtener token de acceso")
+
+        # SUBIDA DEL ARCHIVO A SHAREPOINT
         headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/octet-stream'
         }
-        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'  # Reemplaza con tu site-id
+        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
         file_name = generate_unique_filename(image.name)
         upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
         response = requests.put(upload_url, headers=headers, data=image.read())
+
+        # CREAR LA CONSIGNACIÓN
         estado = 'saldado' if consignacion_data.get('banco') == 'Corresponsal Banco de Bogota' else 'pendiente'
         detalle = consignacion_data.get('detalle') if consignacion_data.get('banco') != 'Otros bancos' else consignacion_data.get('bancoDetalle')
+
         models.Corresponsal_consignacion.objects.create(
-            valor = consignacion_data.get('valor'),
-            banco = consignacion_data.get('banco'),
-            fecha_consignacion = datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
-            fecha = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date(),
-            responsable = usuario.id,
-            estado = estado,
-            detalle = detalle,
-            url = file_name,
-            codigo_incocredito = sucursal,
-            detalle_banco = consignacion_data.get('proveedor'),
+            valor=valor_nuevo,
+            banco=consignacion_data.get('banco'),
+            fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
+            fecha=fecha_consignacion,
+            responsable=usuario.id,
+            estado=estado,
+            detalle=detalle,
+            url=file_name,
+            codigo_incocredito=sucursal,
+            detalle_banco=consignacion_data.get('proveedor'),
         )
-        print(data['data'])
-        return Response([])
+
+        return Response({'detail': 'Consignación registrada correctamente'})
 
 @api_view(['GET', 'POST', 'PUT'])
 def lista_usuarios(request):
