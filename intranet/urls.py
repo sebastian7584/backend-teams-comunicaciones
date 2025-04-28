@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework import routers
 from . import viewsets
 from . import views
+from .views import actas_entrega
 
 router = routers.SimpleRouter()
 
@@ -55,4 +56,6 @@ urlpatterns = [
     path('variables/<int:id>/', views.variables_prices),
     path('formulas', views.formulas_prices),
     path('formulas/<int:id>/', views.formulas_prices),
+    path('actas/', actas_entrega, name='actas_entrega'),  # Para GET y POST
+    path('actas/<int:id>/', actas_entrega, name='actas_entrega_id'),  # Para GET, PUT, DELETE con id
 ]

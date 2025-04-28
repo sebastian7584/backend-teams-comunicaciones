@@ -1,4 +1,4 @@
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, schema
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.exceptions import AuthenticationFailed
@@ -33,7 +33,7 @@ import string
 import base64
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-from .models import ActaEntrega, ActaObjetivo, ActaObservacion, ActaRecibidoPor, ActaArchivo
+from .models import ActaEntrega
 from .serializers import ActaEntregaSerializer
 
 
@@ -129,62 +129,65 @@ def formulas_prices(request, id=None):
     except Exception as e:
         return Response({'error': e}, status=400)
     
-@api_view(['GET', 'POST', 'PUT', 'DELETE'])
-@permission_classes([IsAuthenticated])
 @swagger_auto_schema(
     method='get',
     manual_parameters=[
-        openapi.Parameter('Authorization', openapi.IN_HEADER, description="Token de autenticación", type=openapi.TYPE_STRING)
+        openapi.Parameter('Authorization', openapi.IN_HEADER, description="Token de autenticación", type=openapi.TYPE_STRING),
+        openapi.Parameter('id', openapi.IN_QUERY, description="ID de la acta (opcional)", type=openapi.TYPE_INTEGER)
     ]
 )
+@api_view(['GET', 'POST', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
 def actas_entrega(request, id=None):
     try:
         paginator = PageNumberPagination()
         paginator.page_size = 10
-        
+
         if request.method == 'GET':
-            if id is not None:
-                acta = get_object_or_404(ActaEntrega.objects.prefetch_related(
-                    Prefetch('actaobjetivo_set'),
-                    Prefetch('actaobservacion_set'),
-                    Prefetch('actarecibidopor_set'),
-                    Prefetch('actaarchivo_set')
-                ), id=id)
+            if id:
+                acta = get_object_or_404(
+                    ActaEntrega.objects.prefetch_related(
+                        Prefetch('actaobjetivo_set'),
+                        Prefetch('actaobservacion_set'),
+                        Prefetch('actarecibidopor_set'),
+                        Prefetch('actaarchivo_set')
+                    ), 
+                    id=id
+                )
                 serializer = ActaEntregaSerializer(acta)
                 return Response(serializer.data)
             else:
-                actas = ActaEntrega.objects.all()
+                actas = ActaEntrega.objects.all().order_by('-created_at')
                 result_page = paginator.paginate_queryset(actas, request)
                 serializer = ActaEntregaSerializer(result_page, many=True)
                 return paginator.get_paginated_response(serializer.data)
-        
+
         elif request.method == 'POST':
             serializer = ActaEntregaSerializer(data=request.data)
             if serializer.is_valid():
                 serializer.save()
-                return Response({'message': 'Acta creada exitosamente', 'data': serializer.data})
-            return Response(serializer.errors, status=400)
-        
+                return Response({'message': 'Acta creada exitosamente', 'data': serializer.data}, status=201)
+            return Response({'errors': serializer.errors}, status=400)
+
         elif request.method == 'PUT':
-            if id is None:
+            if not id:
                 return Response({'error': 'ID requerido para actualizar'}, status=400)
             acta = get_object_or_404(ActaEntrega, id=id)
             serializer = ActaEntregaSerializer(acta, data=request.data, partial=True)
             if serializer.is_valid():
                 serializer.save()
                 return Response({'message': 'Acta actualizada correctamente', 'data': serializer.data})
-            return Response(serializer.errors, status=400)
-        
+            return Response({'errors': serializer.errors}, status=400)
+
         elif request.method == 'DELETE':
-            if id is None:
+            if not id:
                 return Response({'error': 'ID requerido para eliminar'}, status=400)
             acta = get_object_or_404(ActaEntrega, id=id)
             acta.delete()
-            return Response({'message': 'Acta eliminada exitosamente'})
-    
-    except Exception as e:
-        return Response({'error': str(e)}, status=400)
+            return Response({'message': 'Acta eliminada exitosamente'}, status=204)
 
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
 def variables_prices(request, id=None):

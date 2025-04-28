@@ -1,17 +1,26 @@
 from rest_framework import serializers
-from django.contrib.auth.models import User
-from . import models
-from .models import ActaEntrega, ActaObjetivo, ActaObservacion, ActaRecibidoPor, ActaArchivo
+from .models import ActaEntrega, ActaObjetivos, ActaObservaciones, ActaRecibidoPor, ActaArchivos, Proyecto
 
-
-class ActaObjetivoSerializer(serializers.ModelSerializer):
+class ProyectoSerializer(serializers.ModelSerializer):
     class Meta:
-        model = ActaObjetivo
+        model = Proyecto
         fields = '__all__'
 
-class ActaObservacionSerializer(serializers.ModelSerializer):
+class ActaEntregaSerializer(serializers.ModelSerializer):
+    proyecto_nombre = serializers.CharField(source='proyecto.nombre', read_only=True)
+
     class Meta:
-        model = ActaObservacion
+        model = ActaEntrega
+        fields = '__all__'
+
+class ActaObjetivosSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ActaObjetivos
+        fields = '__all__'
+
+class ActaObservacionesSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ActaObservaciones
         fields = '__all__'
 
 class ActaRecibidoPorSerializer(serializers.ModelSerializer):
@@ -19,17 +28,7 @@ class ActaRecibidoPorSerializer(serializers.ModelSerializer):
         model = ActaRecibidoPor
         fields = '__all__'
 
-class ActaArchivoSerializer(serializers.ModelSerializer):
+class ActaArchivosSerializer(serializers.ModelSerializer):
     class Meta:
-        model = ActaArchivo
-        fields = '__all__'
-
-class ActaEntregaSerializer(serializers.ModelSerializer):
-    objetivos = ActaObjetivoSerializer(many=True, required=False)
-    observaciones = ActaObservacionSerializer(many=True, required=False)
-    recibidos_por = ActaRecibidoPorSerializer(many=True, required=False)
-    archivos = ActaArchivoSerializer(many=True, required=False)
-
-    class Meta:
-        model = ActaEntrega
+        model = ActaArchivos
         fields = '__all__'
