@@ -35,7 +35,9 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from .models import ActaEntrega
 from .serializers import ActaEntregaSerializer
-
+from . import models
+from django.contrib.auth import authenticate
+from rest_framework.pagination import PageNumberPagination
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
@@ -631,8 +633,16 @@ def encargados_corresponsal(request):
 
 @api_view(['POST'])
 def resumen_corresponsal(request):
-    fecha = request.data['fecha']
-    sucursal = request.data['sucursal']
+    import datetime
+    from django.utils import timezone
+    import pandas as pd
+
+    fecha = request.data.get('fecha')
+    sucursal = request.data.get('sucursal')  # puede ser '0', '-1' o código válido
+
+    if not fecha:
+        return Response({'error': 'Fecha requerida'}, status=400)
+
     tamaño_fecha = len(fecha)
     if tamaño_fecha == 7:
         año, mes = map(int, fecha.split('-'))
@@ -644,51 +654,81 @@ def resumen_corresponsal(request):
     else:
         fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
         fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=sucursal )
-    valor_total = 0
-    for i in transacciones:
-        valor_total = valor_total + i.valor
-    nombre_sucursal = models.Codigo_oficina.objects.get(codigo=sucursal).terminal
-    transacciones2 = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=nombre_sucursal)
+
+    if sucursal and sucursal not in ['0', '-1']:
+        transacciones = models.Transacciones_sucursal.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin),
+            codigo_incocredito=sucursal
+        )
+    else:
+        transacciones = models.Transacciones_sucursal.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin)
+        )
+
+    valor_total = sum(i.valor for i in transacciones)
+
+    # Obtener nombre de la sucursal (solo si es específica)
+    nombre_sucursal = None
+    if sucursal and sucursal not in ['0', '-1']:
+        nombre_sucursal = models.Codigo_oficina.objects.get(codigo=sucursal).terminal
+
+    if nombre_sucursal:
+        transacciones2 = models.Corresponsal_consignacion.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin),
+            codigo_incocredito=nombre_sucursal
+        )
+    else:
+        transacciones2 = models.Corresponsal_consignacion.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin)
+        )
+
     total_datos2 = 0
     pendientes = 0
     transacciones_data = []
     usuarios = User.objects.all()
-    dic_usuarios = { i.id: i.username for i in usuarios}
+    dic_usuarios = {i.id: i.username for i in usuarios}
+
     for t in transacciones2:
-            transacciones_data.append({
-                'id': t.id,
-                'valor' : f"${t.valor:,.2f}",
-                'banco' : t.banco,
-                'fecha_consignacion' : t.fecha_consignacion,
-                'fecha' : t.fecha,
-                'responsable' : dic_usuarios[int(t.responsable)],
-                'estado' : t.estado,
-                'detalle' : t.detalle,
-                'url': t.url
-            })
-            if t.estado == 'pendiente':
-                pendientes = pendientes + t.valor
-            elif t.estado == 'saldado':
-                total_datos2 = total_datos2 + t.valor
-            else:
-                pass
-    sucursal_codigo = models.Codigo_oficina.objects.filter(codigo=sucursal).first()
-    df_consolidado = pd.DataFrame(transacciones_data)
-    consolidado = df_consolidado.to_html(classes='table table-striped', index=False)
+        transacciones_data.append({
+            'id': t.id,
+            'valor': f"${t.valor:,.2f}",
+            'banco': t.banco,
+            'fecha_consignacion': t.fecha_consignacion,
+            'fecha': t.fecha,
+            'responsable': dic_usuarios.get(int(t.responsable), 'Desconocido'),
+            'estado': t.estado,
+            'detalle': t.detalle,
+            'url': t.url
+        })
+        if t.estado == 'pendiente':
+            pendientes += t.valor
+        elif t.estado == 'saldado':
+            total_datos2 += t.valor
+
+    sucursal_codigo = models.Codigo_oficina.objects.filter(codigo=sucursal).first() if sucursal not in ['0', '-1'] else None
+    titulo = sucursal_codigo.terminal if sucursal_codigo else 'Todas las sucursales'
+
     data = {
-        'valor':f"${valor_total:,.2f}", 
-        'titulo':sucursal_codigo.terminal,
+        'valor': f"${valor_total:,.2f}",
+        'titulo': titulo,
         'consignacion': f"${total_datos2:,.2f}",
         'pendiente': f"${pendientes:,.2f}",
-        'restante':f"${valor_total - total_datos2 - pendientes:,.2f}",
+        'restante': f"${valor_total - total_datos2 - pendientes:,.2f}",
         'consignaciones': transacciones_data
     }
     return Response(data)
 
+
 @api_view(['POST'])
 def select_datos_corresponsal(request):
-    fecha = request.data['fecha']
+    import datetime
+    import pandas as pd
+    from django.utils import timezone
+
+    fecha = request.data.get('fecha')
+    if not fecha:
+        return Response({'error': 'Fecha requerida'}, status=400)
+
     tamaño_fecha = len(fecha)
     if tamaño_fecha == 7:
         año, mes = map(int, fecha.split('-'))
@@ -700,77 +740,76 @@ def select_datos_corresponsal(request):
     else:
         fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
         fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-    
-    # Consulta de transacciones en el rango de fechas
+
     transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
-    transacciones_data = []
-    for t in transacciones:
-        transacciones_data.append({
-            'establecimiento': t.establecimiento,
-            'codigo_aval': t.codigo_aval,
-            'codigo_incocredito': t.codigo_incocredito,
-            'terminal': t.terminal,
-            'fecha': t.fecha.strftime('%d/%m/%Y'),
-            'hora': t.hora,
-            'nombre_convenio': t.nombre_convenio,
-            'operacion': t.operacion,
-            'fact_cta': t.fact_cta,
-            'cod_aut': t.cod_aut,
-            'valor': t.valor,
-            'nura': t.nura,
-            'esquema': t.esquema,
-            'numero_tarjeta': t.numero_tarjeta,
-            'comision': t.comision,
-        })
-    
-    # Consulta de sucursales
+    transacciones_data = [{
+        'establecimiento': t.establecimiento,
+        'codigo_aval': t.codigo_aval,
+        'codigo_incocredito': t.codigo_incocredito,
+        'terminal': t.terminal,
+        'fecha': t.fecha.strftime('%d/%m/%Y'),
+        'hora': t.hora,
+        'nombre_convenio': t.nombre_convenio,
+        'operacion': t.operacion,
+        'fact_cta': t.fact_cta,
+        'cod_aut': t.cod_aut,
+        'valor': t.valor,
+        'nura': t.nura,
+        'esquema': t.esquema,
+        'numero_tarjeta': t.numero_tarjeta,
+        'comision': t.comision,
+    } for t in transacciones]
+
     sucursales = models.Codigo_oficina.objects.all()
-    cod_sucursales = {i.codigo: i.terminal for i in sucursales} 
+    cod_sucursales = {i.codigo: i.terminal for i in sucursales}
     sucursales_dict = [{'value': i.codigo, 'text': i.terminal} for i in sucursales]
-    
-    # Procesamiento de datos de transacciones
+
     df_transacciones = pd.DataFrame(transacciones_data)
     df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales)
     df_transacciones['cuenta'] = 1
-    df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({'cuenta': 'sum', 'valor': 'sum'}).reset_index()
-    
+
+    df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({
+        'cuenta': 'sum',
+        'valor': 'sum'
+    }).reset_index()
+
     if tamaño_fecha == 7:
         fecha_inicio = timezone.make_aware(fecha_inicio, timezone.get_current_timezone())
         fecha_fin = timezone.make_aware(fecha_fin, timezone.get_current_timezone())
-    
-    # Consulta de consignaciones
+
     consignaciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
-    consignaciones_data = []
-    for i in consignaciones:
-        consignaciones_data.append({
-            'codigo_incocredito': i.codigo_incocredito,
-            'estado': i.estado,
-            'valor': i.valor,
-        })
-    
-    # Procesamiento de datos de consignaciones
-    if len(consignaciones_data) > 0:
-        df_consignaciones = pd.DataFrame(consignaciones_data)
-        df_consignaciones = df_consignaciones.pivot_table(
-            index='codigo_incocredito', 
-            columns='estado', 
-            values='valor', 
+    consignaciones_data = [{
+        'codigo_incocredito': i.codigo_incocredito,
+        'estado': i.estado,
+        'valor': i.valor
+    } for i in consignaciones]
+
+    if consignaciones_data:
+        df_consignaciones = pd.DataFrame(consignaciones_data).pivot_table(
+            index='codigo_incocredito',
+            columns='estado',
+            values='valor',
             aggfunc='sum'
-        ).reset_index()
-        df_consignaciones = df_consignaciones.fillna(0)
+        ).reset_index().fillna(0)
+
         df_consolidado = pd.merge(df_consolidado, df_consignaciones, on='codigo_incocredito', how='outer')
-    
+
     df_consolidado = df_consolidado.fillna(0)
     df_consolidado['valor'] = df_consolidado['valor'].apply(lambda x: f"${x:,.2f}")
     if 'pendiente' in df_consolidado.columns:
         df_consolidado['pendiente'] = df_consolidado['pendiente'].apply(lambda x: f"${x:,.2f}")
     if 'saldado' in df_consolidado.columns:
         df_consolidado['saldado'] = df_consolidado['saldado'].apply(lambda x: f"${x:,.2f}")
-    
+
     consolidado = df_consolidado.to_dict(orient='records')
-    data_excel = [i | {'sucursal': cod_sucursales[i['codigo_incocredito']]} for i in transacciones_data]
-    
-    return Response({'consolidado': consolidado, 'sucursales': sucursales_dict, 'data': data_excel })
+    data_excel = [i | {'sucursal': cod_sucursales.get(i['codigo_incocredito'], 'Desconocida')} for i in transacciones_data]
+
+    return Response({
+        'consolidado': consolidado,
+        'sucursales': sucursales_dict,
+        'data': data_excel
+    })
+
 
 @api_view(['POST'])
 def select_datos_corresponsal_cajero(request):
