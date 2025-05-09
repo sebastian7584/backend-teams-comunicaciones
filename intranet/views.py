@@ -941,7 +941,7 @@ def guardar_datos_corresponsal(request):
                 esquema = row.esquema
                 numero_tarjeta = row.numero_tarjeta
                 comision = row.comision
-            transacciones.append(models.Transacciones_sucursal(
+                transacciones.append(models.Transacciones_sucursal(
                 establecimiento=establecimiento,
                 codigo_aval=codigo_aval,
                 codigo_incocredito=codigo_incocredito,
