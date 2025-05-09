@@ -2158,6 +2158,7 @@ def lista_productos_prepago(request):
             # Filtros de productos y descuentos
             df_descuentos = df[df['nombre'] == 'descuento'].sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).rename(columns={'valor': 'descuento'})
 
+
             df_precio = df[df['nombre'] == precio].sort_values('dia', ascending=False).drop_duplicates('producto')
             df_precio = pd.merge(df_precio, df_descuentos[['producto', 'descuento']], on='producto', how='left')
 
@@ -2218,6 +2219,7 @@ def lista_productos_prepago(request):
                 base = 1095578
                 new_data = []
 
+
                 for _, row in df_precio.iterrows():
                     if precio == 'Costo':
                         new_data.append({
@@ -2270,6 +2272,7 @@ def lista_productos_prepago(request):
                 new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
 
                 return Response({'data': new_data})
+
 
         except Exception as e:
             return Response({'error': f'Error interno: {str(e)}'}, status=500)
