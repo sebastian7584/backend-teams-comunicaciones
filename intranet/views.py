@@ -2210,8 +2210,8 @@ def lista_productos_prepago(request):
                         tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
                     new_data.append(tem_data)
 
-            # position = {1:'up', 2: 'down', 3: 'neutral'}
-            # new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
+                # position = {1:'up', 2: 'down', 3: 'neutral'}
+                # new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
 
 
                 df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': 'costo'})
