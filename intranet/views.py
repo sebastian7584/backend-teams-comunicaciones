@@ -2115,7 +2115,8 @@ def lista_productos_prepago(request):
             # Obtener los permisos de precios del usuario
             listas = models.Permisos_usuarios_precio.objects.filter(user=usuario.id)
             lista_precios = [{'id': i.permiso.permiso, 'nombre': traduccion.get(i.permiso.permiso, i.permiso.permiso)} for i in listas]
-
+            pass
+            pass
             df_filtrado = df[df['nombre'] == precio]
 
             df_filtrado_sorted = df_filtrado.sort_values(['producto', 'dia'], ascending=[True, False])
