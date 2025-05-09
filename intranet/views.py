@@ -866,7 +866,10 @@ def select_datos_corresponsal_cajero(request):
 def guardar_datos_corresponsal(request):
     cabecera = request.data['cabecera']
     items = request.data['items']
-    df = pd.DataFrame(items, columns=cabecera)
+
+    print(len(items))
+    df =pd.DataFrame(items, columns=cabecera)
+
     df.fillna("", inplace=True)
     df['valor'] = df['valor'].replace("", "0").astype(int)
     df['nura'] = df['nura'].replace("", "0").astype(int)
@@ -881,46 +884,87 @@ def guardar_datos_corresponsal(request):
         fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ'))
         fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ'))
     
-    duplicados_info = []
-    registros_unicos = []
+    try:
+        transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_minima, fecha_maxima))
+        transacciones_data = []
+        for t in transacciones:
+            valor = t.valor if t.operacion != 'Retiro' else - t.valor
+            if t.operacion == 'Retiro':
+                pass
+            transacciones_data.append({
+                'establecimiento': t.establecimiento,
+                'codigo_aval': t.codigo_aval,
+                'codigo_incocredito': t.codigo_incocredito,
+                'terminal': t.terminal,
+                'fecha': t.fecha.strftime('%d/%m/%Y'),
+                'hora': t.hora,
+                'nombre_convenio': t.nombre_convenio,
+                'operacion': t.operacion,
+                'fact_cta': t.fact_cta,
+                'cod_aut': t.cod_aut,
+                'valor': valor,
+                'nura': t.nura,
+                'esquema': t.esquema,
+                'numero_tarjeta': t.numero_tarjeta,
+                'comision': t.comision,
+            })
+
+        rows_to_drop = []
+        for index, row in df.iterrows():
+            row_dict = row.to_dict()
+            if row_dict in transacciones_data:
+                # print('esta es igual ')
+                rows_to_drop.append(index)
+        df.drop(rows_to_drop, inplace=True)
+    except:
+        pass
+    transacciones = []
     
     for index, row in df.iterrows():
-        if models.Transacciones_sucursal.objects.filter(codigo_incocredito=row['codigo_incocredito'], fecha=row['fecha']).exists():
-            duplicados_info.append({'linea': index + 2, 'codigo_incocredito': row['codigo_incocredito']})
-        else:
-            registros_unicos.append(row.to_dict())
-    
-    transacciones = []
-    for registro in registros_unicos:
         try:
             try:
-                time_date = datetime.datetime.strptime(registro['fecha'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                time_date = datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ')
             except:
-                time_date = datetime.datetime.strptime(registro['fecha'], "%d/%m/%Y").date()
+                ime_date = datetime.datetime.strptime(row.fecha, "%d/%m/%Y").date()
+                establecimiento = row.establecimiento
+                codigo_aval = row.codigo_aval
+                codigo_incocredito = row.codigo_incocredito
+                terminal = row.terminal
+                fecha = time_date
+                hora = row.hora
+                nombre_convenio = row.nombre_convenio
+                operacion = row.operacion
+                fact_cta = row.fact_cta
+                cod_aut = row.cod_aut
+                valor = row.valor if row.operacion != 'Retiro' else - row.valor
+                nura = row.nura
+                esquema = row.esquema
+                numero_tarjeta = row.numero_tarjeta
+                comision = row.comision
             transacciones.append(models.Transacciones_sucursal(
-                establecimiento=registro['establecimiento'],
-                codigo_aval=registro['codigo_aval'],
-                codigo_incocredito=registro['codigo_incocredito'],
-                terminal=registro['terminal'],
-                fecha=time_date,
-                hora=registro['hora'],
-                nombre_convenio=registro['nombre_convenio'],
-                operacion=registro['operacion'],
-                fact_cta=registro['fact_cta'],
-                cod_aut=registro['cod_aut'],
-                valor=registro['valor'] if registro['operacion'] != 'Retiro' else -registro['valor'],
-                nura=registro['nura'],
-                esquema=registro['esquema'],
-                numero_tarjeta=registro['numero_tarjeta'],
-                comision=registro['comision'],
+                establecimiento=establecimiento,
+                codigo_aval=codigo_aval,
+                codigo_incocredito=codigo_incocredito,
+                terminal=terminal,
+                fecha=fecha,
+                hora=hora,
+                nombre_convenio=nombre_convenio,
+                operacion=operacion,
+                fact_cta=fact_cta,
+                cod_aut=cod_aut,
+                valor=valor,
+                nura=nura,
+                esquema=esquema,
+                numero_tarjeta=numero_tarjeta,
+                comision=comision,
             ))
         except Exception as e:
-            texto = str(e).replace("'Series' object has no attribute ", "Datos no tienen columna ")
+            texto = str(e).replace("'Series' object has no attribute ","Datos no tienen columna ")
             raise AuthenticationFailed(texto)
     
     models.Transacciones_sucursal.objects.bulk_create(transacciones)
     
-    return Response({'mensaje': 'Guardado con éxito', 'duplicados': duplicados_info})
+    return Response({'mensaje':'Guardado con exito'})
 
 @api_view(['POST'])
 def calcular_comisiones(request):
@@ -1980,7 +2024,7 @@ def translate_prepago(requests):
                 data.append(temp_data)
             # print(cabecera)
         return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
-    
+
 @api_view(['PUT', 'POST'])
 def lista_productos_prepago_equipo(requests):
     if requests.method == 'POST':
@@ -2010,6 +2054,27 @@ def lista_productos_prepago_equipo(requests):
 
         return Response({'data' : new_data})
 
+def calcular_variacion(row):
+    if pd.isna(row['valor_anterior']):
+        return 'neutral'
+    elif row['valor_actual'] > row['valor_anterior']:
+        dif = row['valor_actual'] - row['valor_anterior']
+        if row['valor_anterior'] > 0:
+            percentage = dif / row['valor_anterior']*100
+        else:
+            percentage = 0
+        percentage = f'{round(percentage, 2)}%'
+        return f'up-{dif}-{percentage}'
+    elif row['valor_actual'] < row['valor_anterior']:
+        dif = row['valor_anterior'] - row['valor_actual']
+        if row['valor_anterior'] > 0:
+            percentage = dif / row['valor_anterior']*100
+        else:
+            percentage = 0
+        percentage = f'{round(percentage, 2)}%'
+        return f'down-{dif}-{percentage}'
+    else:
+        return 'neutral'
 
 @api_view(['PUT', 'POST'])
 def lista_productos_prepago(request):
@@ -2051,7 +2116,23 @@ def lista_productos_prepago(request):
             listas = models.Permisos_usuarios_precio.objects.filter(user=usuario.id)
             lista_precios = [{'id': i.permiso.permiso, 'nombre': traduccion.get(i.permiso.permiso, i.permiso.permiso)} for i in listas]
 
-            return Response({'data': lista_precios})
+
+        df_filtrado = df[df['nombre'] == precio]
+
+        df_filtrado_sorted = df_filtrado.sort_values(['producto', 'dia'], ascending=[True, False])
+        df_filtrado_sorted['rank'] = df_filtrado_sorted.groupby('producto').cumcount()
+
+        df_actual = df_filtrado_sorted[df_filtrado_sorted['rank'] == 0][['producto', 'valor']].rename(columns={'valor': 'valor_actual'})
+        df_anterior = df_filtrado_sorted[df_filtrado_sorted['rank'] == 1][['producto', 'valor']].rename(columns={'valor': 'valor_anterior'})
+        
+        df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+        df_variacion = pd.merge(df_actual, df_anterior, on='producto', how='left')
+        
+        df_variacion['variation'] = df_variacion.apply(calcular_variacion, axis=1)
+
+
+        df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
+
 
         except Exception as e:
             return Response({'error': f'Error interno: {str(e)}'}, status=500)
@@ -2069,8 +2150,14 @@ def lista_productos_prepago(request):
             if df.empty:
                 return Response({'data': []})
 
-            df['dia'] = pd.to_datetime(df['dia'])
-            df['valor'] = df['valor'].astype(float)
+
+        df_costo = df[df['nombre'] == 'Costo']
+        df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+        df_costo = df_costo.rename(columns={'valor': 'costo'})
+        df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
+        
+        df_resultado = pd.merge(df_resultado, df_variacion[['producto', 'variation']], on='producto', how='left')
+
 
             # Filtros de productos y descuentos
             df_descuentos = df[df['nombre'] == 'descuento'].sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).rename(columns={'valor': 'descuento'})
@@ -2079,13 +2166,54 @@ def lista_productos_prepago(request):
             df_precio = df[df['nombre'] == precio].sort_values('dia', ascending=False).drop_duplicates('producto')
             df_precio = pd.merge(df_precio, df_descuentos[['producto', 'descuento']], on='producto', how='left')
 
-            # Agregar kits según el tipo de precio
-            kits = ['Kit Addi', 'Kit Fintech', 'Kit Valle', 'Kit Sub']
-            kit_nombres = ['kit addi', 'kit fintech', 'kit valle', 'kit sub']
 
-            for kit, kit_nombre in zip(kits, kit_nombres):
-                df_kit = df[df['nombre'] == kit].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': kit_nombre})
-                df_precio = pd.merge(df_precio, df_kit[['producto', kit_nombre]], on='producto', how='left')
+        for index, row in df_resultado.iterrows():
+            if precio == 'Costo':
+                tem_data = {
+                    'equipo': row['producto'],
+                    'costo': '${:,.2f}'.format(row['costo']),
+                    'descuento': '${:,.2f}'.format(row['descuento']),
+                    'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
+                }
+                tem_data['variation'] = row['variation']
+                new_data.append(tem_data)
+            else:
+                valor = row['valor']
+                iva = row['valor'] * 0.19 if row['valor'] >= base else 0
+                total = sim * 1.19 + valor + iva
+                tem_data = {
+                    'equipo': row['producto'],
+                    'precio simcard': '${:,.2f}'.format(sim),
+                    'IVA simcard': '${:,.2f}'.format(sim * 0.19),
+                    'equipo sin IVA': '${:,.2f}'.format(valor),
+                    'IVA equipo': '${:,.2f}'.format(iva),
+                }
+                if precio == 'Precio sub':
+                    kit = row['kit sub']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                elif precio == 'Precio Fintech':
+                    kit = row['kit fintech']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                elif precio == 'Precio Addi':
+                    kit = row['kit addi']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                elif precio == 'Precio Adelantos Valle':
+                    kit = row['kit valle']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                
+                tem_data['total'] = '${:,.2f}'.format(total)
+                tem_data['variation'] = row['variation']
+                if precio == 'Precio publico':
+                    tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
+                new_data.append(tem_data)
+
+        # position = {1:'up', 2: 'down', 3: 'neutral'}
+        # new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
+
 
             df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': 'costo'})
             df_precio = pd.merge(df_precio, df_costo[['producto', 'costo']], on='producto', how='left')
