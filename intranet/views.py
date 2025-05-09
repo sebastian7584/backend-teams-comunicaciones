@@ -2116,7 +2116,6 @@ def lista_productos_prepago(request):
             listas = models.Permisos_usuarios_precio.objects.filter(user=usuario.id)
             lista_precios = [{'id': i.permiso.permiso, 'nombre': traduccion.get(i.permiso.permiso, i.permiso.permiso)} for i in listas]
 
-
             df_filtrado = df[df['nombre'] == precio]
 
             df_filtrado_sorted = df_filtrado.sort_values(['producto', 'dia'], ascending=[True, False])
@@ -2129,11 +2128,7 @@ def lista_productos_prepago(request):
             df_variacion = pd.merge(df_actual, df_anterior, on='producto', how='left')
             
             df_variacion['variation'] = df_variacion.apply(calcular_variacion, axis=1)
-
-
             df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
-
-
         except Exception as e:
             return Response({'error': f'Error interno: {str(e)}'}, status=500)
 
