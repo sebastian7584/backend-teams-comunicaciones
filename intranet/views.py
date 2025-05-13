@@ -870,7 +870,10 @@ def guardar_datos_corresponsal(request):
 
     cabecera = request.data['cabecera']
     items = request.data['items']
-    df = pd.DataFrame(items, columns=cabecera)
+
+    print(len(items))
+    df =pd.DataFrame(items, columns=cabecera)
+
     df.fillna("", inplace=True)
     
     # Normalizar campos numéricos
@@ -963,7 +966,6 @@ def guardar_datos_corresponsal(request):
         'duplicados': duplicados_info,
         'insertados': len(transacciones)
     })
-
 
 @api_view(['POST'])
 def calcular_comisiones(request):
@@ -2023,7 +2025,7 @@ def translate_prepago(requests):
                 data.append(temp_data)
             # print(cabecera)
         return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
-    
+
 @api_view(['PUT', 'POST'])
 def lista_productos_prepago_equipo(requests):
     if requests.method == 'POST':
@@ -2053,6 +2055,27 @@ def lista_productos_prepago_equipo(requests):
 
         return Response({'data' : new_data})
 
+def calcular_variacion(row):
+    if pd.isna(row['valor_anterior']):
+        return 'neutral'
+    elif row['valor_actual'] > row['valor_anterior']:
+        dif = row['valor_actual'] - row['valor_anterior']
+        if row['valor_anterior'] > 0:
+            percentage = dif / row['valor_anterior']*100
+        else:
+            percentage = 0
+        percentage = f'{round(percentage, 2)}%'
+        return f'up-{dif}-{percentage}'
+    elif row['valor_actual'] < row['valor_anterior']:
+        dif = row['valor_anterior'] - row['valor_actual']
+        if row['valor_anterior'] > 0:
+            percentage = dif / row['valor_anterior']*100
+        else:
+            percentage = 0
+        percentage = f'{round(percentage, 2)}%'
+        return f'down-{dif}-{percentage}'
+    else:
+        return 'neutral'
 
 @api_view(['PUT', 'POST'])
 def lista_productos_prepago(request):
@@ -2093,9 +2116,21 @@ def lista_productos_prepago(request):
             # Obtener los permisos de precios del usuario
             listas = models.Permisos_usuarios_precio.objects.filter(user=usuario.id)
             lista_precios = [{'id': i.permiso.permiso, 'nombre': traduccion.get(i.permiso.permiso, i.permiso.permiso)} for i in listas]
+            pass
+            pass
+            df_filtrado = df[df['nombre'] == precio]
 
-            return Response({'data': lista_precios})
+            df_filtrado_sorted = df_filtrado.sort_values(['producto', 'dia'], ascending=[True, False])
+            df_filtrado_sorted['rank'] = df_filtrado_sorted.groupby('producto').cumcount()
 
+            df_actual = df_filtrado_sorted[df_filtrado_sorted['rank'] == 0][['producto', 'valor']].rename(columns={'valor': 'valor_actual'})
+            df_anterior = df_filtrado_sorted[df_filtrado_sorted['rank'] == 1][['producto', 'valor']].rename(columns={'valor': 'valor_anterior'})
+            
+            df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+            df_variacion = pd.merge(df_actual, df_anterior, on='producto', how='left')
+            
+            df_variacion['variation'] = df_variacion.apply(calcular_variacion, axis=1)
+            df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
         except Exception as e:
             return Response({'error': f'Error interno: {str(e)}'}, status=500)
 
@@ -2112,44 +2147,37 @@ def lista_productos_prepago(request):
             if df.empty:
                 return Response({'data': []})
 
-            df['dia'] = pd.to_datetime(df['dia'])
-            df['valor'] = df['valor'].astype(float)
+
+            df_costo = df[df['nombre'] == 'Costo']
+            df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+            df_costo = df_costo.rename(columns={'valor': 'costo'})
+            df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
+            
+            df_resultado = pd.merge(df_resultado, df_variacion[['producto', 'variation']], on='producto', how='left')
+
 
             # Filtros de productos y descuentos
             df_descuentos = df[df['nombre'] == 'descuento'].sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).rename(columns={'valor': 'descuento'})
 
+
             df_precio = df[df['nombre'] == precio].sort_values('dia', ascending=False).drop_duplicates('producto')
             df_precio = pd.merge(df_precio, df_descuentos[['producto', 'descuento']], on='producto', how='left')
 
-            # Agregar kits según el tipo de precio
-            kits = ['Kit Addi', 'Kit Fintech', 'Kit Valle', 'Kit Sub']
-            kit_nombres = ['kit addi', 'kit fintech', 'kit valle', 'kit sub']
 
-            for kit, kit_nombre in zip(kits, kit_nombres):
-                df_kit = df[df['nombre'] == kit].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': kit_nombre})
-                df_precio = pd.merge(df_precio, df_kit[['producto', kit_nombre]], on='producto', how='left')
-
-            df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': 'costo'})
-            df_precio = pd.merge(df_precio, df_costo[['producto', 'costo']], on='producto', how='left')
-
-            # Variables fijas
-            sim = 2000
-            base = 1095578
-            new_data = []
-
-            for _, row in df_precio.iterrows():
+            for index, row in df_resultado.iterrows():
                 if precio == 'Costo':
-                    new_data.append({
+                    tem_data = {
                         'equipo': row['producto'],
                         'costo': '${:,.2f}'.format(row['costo']),
                         'descuento': '${:,.2f}'.format(row['descuento']),
                         'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
-                    })
+                    }
+                    tem_data['variation'] = row['variation']
+                    new_data.append(tem_data)
                 else:
                     valor = row['valor']
-                    iva = valor * 0.19 if valor >= base else 0
+                    iva = row['valor'] * 0.19 if row['valor'] >= base else 0
                     total = sim * 1.19 + valor + iva
-
                     tem_data = {
                         'equipo': row['producto'],
                         'precio simcard': '${:,.2f}'.format(sim),
@@ -2157,38 +2185,95 @@ def lista_productos_prepago(request):
                         'equipo sin IVA': '${:,.2f}'.format(valor),
                         'IVA equipo': '${:,.2f}'.format(iva),
                     }
-
-                    # Asignar KIT según el precio
                     if precio == 'Precio sub':
                         kit = row['kit sub']
+                        tem_data['KIT'] = kit
+                        total = total + kit
                     elif precio == 'Precio Fintech':
                         kit = row['kit fintech']
+                        tem_data['KIT'] = kit
+                        total = total + kit
                     elif precio == 'Precio Addi':
                         kit = row['kit addi']
+                        tem_data['KIT'] = kit
+                        total = total + kit
                     elif precio == 'Precio Adelantos Valle':
                         kit = row['kit valle']
-                    else:
-                        kit = 0
-
-                    if kit:
-                        tem_data['KIT'] = '${:,.2f}'.format(kit)
-                        total += kit
-
+                        tem_data['KIT'] = kit
+                        total = total + kit
+                    
                     tem_data['total'] = '${:,.2f}'.format(total)
-
-                    # Promo si hay descuento
-                    if precio == 'Precio publico' and row['descuento'] > 0:
-                        tem_data['Promo'] = 'PROMO'
-                    else:
-                        tem_data['Promo'] = 'NO'
-
+                    tem_data['variation'] = row['variation']
+                    if precio == 'Precio publico':
+                        tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
                     new_data.append(tem_data)
 
-            # Variación aleatoria en precios
-            position = {1: 'up', 2: 'down', 3: 'neutral'}
-            new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
+                # position = {1:'up', 2: 'down', 3: 'neutral'}
+                # new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
 
-            return Response({'data': new_data})
+
+                df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': 'costo'})
+                df_precio = pd.merge(df_precio, df_costo[['producto', 'costo']], on='producto', how='left')
+
+                # Variables fijas
+                sim = 2000
+                base = 1095578
+                new_data = []
+
+
+                for _, row in df_precio.iterrows():
+                    if precio == 'Costo':
+                        new_data.append({
+                            'equipo': row['producto'],
+                            'costo': '${:,.2f}'.format(row['costo']),
+                            'descuento': '${:,.2f}'.format(row['descuento']),
+                            'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
+                        })
+                    else:
+                        valor = row['valor']
+                        iva = valor * 0.19 if valor >= base else 0
+                        total = sim * 1.19 + valor + iva
+
+                        tem_data = {
+                            'equipo': row['producto'],
+                            'precio simcard': '${:,.2f}'.format(sim),
+                            'IVA simcard': '${:,.2f}'.format(sim * 0.19),
+                            'equipo sin IVA': '${:,.2f}'.format(valor),
+                            'IVA equipo': '${:,.2f}'.format(iva),
+                        }
+
+                        # Asignar KIT según el precio
+                        if precio == 'Precio sub':
+                            kit = row['kit sub']
+                        elif precio == 'Precio Fintech':
+                            kit = row['kit fintech']
+                        elif precio == 'Precio Addi':
+                            kit = row['kit addi']
+                        elif precio == 'Precio Adelantos Valle':
+                            kit = row['kit valle']
+                        else:
+                            kit = 0
+
+                        if kit:
+                            tem_data['KIT'] = '${:,.2f}'.format(kit)
+                            total += kit
+
+                        tem_data['total'] = '${:,.2f}'.format(total)
+
+                        # Promo si hay descuento
+                        if precio == 'Precio publico' and row['descuento'] > 0:
+                            tem_data['Promo'] = 'PROMO'
+                        else:
+                            tem_data['Promo'] = 'NO'
+
+                        new_data.append(tem_data)
+
+                # Variación aleatoria en precios
+                position = {1: 'up', 2: 'down', 3: 'neutral'}
+                new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
+
+                return Response({'data': new_data})
+
 
         except Exception as e:
             return Response({'error': f'Error interno: {str(e)}'}, status=500)
