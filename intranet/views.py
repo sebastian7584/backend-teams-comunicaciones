@@ -864,6 +864,10 @@ def select_datos_corresponsal_cajero(request):
 
 @api_view(['POST'])
 def guardar_datos_corresponsal(request):
+    import pandas as pd
+    from django.utils import timezone
+    import datetime
+
     cabecera = request.data['cabecera']
     items = request.data['items']
 
@@ -871,15 +875,19 @@ def guardar_datos_corresponsal(request):
     df =pd.DataFrame(items, columns=cabecera)
 
     df.fillna("", inplace=True)
+    
+    # Normalizar campos numéricos
     df['valor'] = df['valor'].replace("", "0").astype(int)
     df['nura'] = df['nura'].replace("", "0").astype(int)
     df['comision'] = df['comision'].replace("", "0").astype(int)
-    
+
+    # Detectar rangos de fechas para filtrar posibles duplicados existentes
     fecha_min = df['fecha'].min()
     fecha_max = df['fecha'].max()
+
     try:
-        fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%d/%m/%Y'))
-        fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%d/%m/%Y'))
+        fecha_min_dt = datetime.datetime.strptime(fecha_min, '%d/%m/%Y')
+        fecha_max_dt = datetime.datetime.strptime(fecha_max, '%d/%m/%Y')
     except:
         fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ'))
         fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ'))
