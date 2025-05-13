@@ -56,6 +56,6 @@ urlpatterns = [
     path('variables/<int:id>/', views.variables_prices),
     path('formulas', views.formulas_prices),
     path('formulas/<int:id>/', views.formulas_prices),
-    path('actas/', actas_entrega, name='actas_entrega'),  # Para GET y POST
-    path('actas/<int:id>/', actas_entrega, name='actas_entrega_id'),  # Para GET, PUT, DELETE con id
+    path('actas-entrega/', actas_entrega, name='actas_entrega'),
+    path('actas-entrega/<int:id>/', actas_entrega, name='actas_entrega_id'),
 ]
