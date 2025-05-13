@@ -864,6 +864,10 @@ def select_datos_corresponsal_cajero(request):
 
 @api_view(['POST'])
 def guardar_datos_corresponsal(request):
+    import pandas as pd
+    from django.utils import timezone
+    import datetime
+
     cabecera = request.data['cabecera']
     items = request.data['items']
 
@@ -871,100 +875,97 @@ def guardar_datos_corresponsal(request):
     df =pd.DataFrame(items, columns=cabecera)
 
     df.fillna("", inplace=True)
+    
+    # Normalizar campos numéricos
     df['valor'] = df['valor'].replace("", "0").astype(int)
     df['nura'] = df['nura'].replace("", "0").astype(int)
     df['comision'] = df['comision'].replace("", "0").astype(int)
-    
+
+    # Detectar rangos de fechas para filtrar posibles duplicados existentes
     fecha_min = df['fecha'].min()
     fecha_max = df['fecha'].max()
-    try:
-        fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%d/%m/%Y'))
-        fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%d/%m/%Y'))
-    except:
-        fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ'))
-        fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ'))
-    
-    try:
-        transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_minima, fecha_maxima))
-        transacciones_data = []
-        for t in transacciones:
-            valor = t.valor if t.operacion != 'Retiro' else - t.valor
-            if t.operacion == 'Retiro':
-                pass
-            transacciones_data.append({
-                'establecimiento': t.establecimiento,
-                'codigo_aval': t.codigo_aval,
-                'codigo_incocredito': t.codigo_incocredito,
-                'terminal': t.terminal,
-                'fecha': t.fecha.strftime('%d/%m/%Y'),
-                'hora': t.hora,
-                'nombre_convenio': t.nombre_convenio,
-                'operacion': t.operacion,
-                'fact_cta': t.fact_cta,
-                'cod_aut': t.cod_aut,
-                'valor': valor,
-                'nura': t.nura,
-                'esquema': t.esquema,
-                'numero_tarjeta': t.numero_tarjeta,
-                'comision': t.comision,
-            })
 
-        rows_to_drop = []
-        for index, row in df.iterrows():
-            row_dict = row.to_dict()
-            if row_dict in transacciones_data:
-                # print('esta es igual ')
-                rows_to_drop.append(index)
-        df.drop(rows_to_drop, inplace=True)
+    try:
+        fecha_min_dt = datetime.datetime.strptime(fecha_min, '%d/%m/%Y')
+        fecha_max_dt = datetime.datetime.strptime(fecha_max, '%d/%m/%Y')
     except:
-        pass
+        fecha_min_dt = datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ')
+        fecha_max_dt = datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ')
+
+    fecha_minima = timezone.make_aware(fecha_min_dt)
+    fecha_maxima = timezone.make_aware(fecha_max_dt)
+
+    # Obtener todos los registros existentes en ese rango de fechas
+    registros_existentes = models.Transacciones_sucursal.objects.filter(
+        fecha__range=(fecha_minima, fecha_maxima)
+    ).values(
+        'establecimiento', 'codigo_aval', 'codigo_incocredito', 'terminal', 'fecha', 'hora',
+        'nombre_convenio', 'operacion', 'fact_cta', 'cod_aut', 'valor', 'nura',
+        'esquema', 'numero_tarjeta', 'comision'
+    )
+
+    # Convertir los registros existentes en un set de tuplas (más rápido para búsqueda)
+    existentes_set = set(
+        tuple((
+            str(r['establecimiento']), str(r['codigo_aval']), str(r['codigo_incocredito']),
+            str(r['terminal']), r['fecha'].strftime('%d/%m/%Y'), str(r['hora']),
+            str(r['nombre_convenio']), str(r['operacion']), str(r['fact_cta']),
+            str(r['cod_aut']), int(r['valor']), int(r['nura']),
+            str(r['esquema']), str(r['numero_tarjeta']), int(r['comision'])
+        )) for r in registros_existentes
+    )
+
+    duplicados_info = []
     transacciones = []
-    
+
     for index, row in df.iterrows():
-        try:
+        tupla_row = (
+            str(row['establecimiento']), str(row['codigo_aval']), str(row['codigo_incocredito']),
+            str(row['terminal']), row['fecha'], str(row['hora']),
+            str(row['nombre_convenio']), str(row['operacion']), str(row['fact_cta']),
+            str(row['cod_aut']), int(row['valor']), int(row['nura']),
+            str(row['esquema']), str(row['numero_tarjeta']), int(row['comision'])
+        )
+
+        if tupla_row in existentes_set:
+            duplicados_info.append({'linea': index + 2})
+        else:
             try:
-                time_date = datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ')
-            except:
-                ime_date = datetime.datetime.strptime(row.fecha, "%d/%m/%Y").date()
-                establecimiento = row.establecimiento
-                codigo_aval = row.codigo_aval
-                codigo_incocredito = row.codigo_incocredito
-                terminal = row.terminal
-                fecha = time_date
-                hora = row.hora
-                nombre_convenio = row.nombre_convenio
-                operacion = row.operacion
-                fact_cta = row.fact_cta
-                cod_aut = row.cod_aut
-                valor = row.valor if row.operacion != 'Retiro' else - row.valor
-                nura = row.nura
-                esquema = row.esquema
-                numero_tarjeta = row.numero_tarjeta
-                comision = row.comision
+                # Parsear fecha al tipo adecuado
+                try:
+                    fecha_dt = datetime.datetime.strptime(row['fecha'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                except:
+                    fecha_dt = datetime.datetime.strptime(row['fecha'], "%d/%m/%Y").date()
+                
                 transacciones.append(models.Transacciones_sucursal(
-                establecimiento=establecimiento,
-                codigo_aval=codigo_aval,
-                codigo_incocredito=codigo_incocredito,
-                terminal=terminal,
-                fecha=fecha,
-                hora=hora,
-                nombre_convenio=nombre_convenio,
-                operacion=operacion,
-                fact_cta=fact_cta,
-                cod_aut=cod_aut,
-                valor=valor,
-                nura=nura,
-                esquema=esquema,
-                numero_tarjeta=numero_tarjeta,
-                comision=comision,
-            ))
-        except Exception as e:
-            texto = str(e).replace("'Series' object has no attribute ","Datos no tienen columna ")
-            raise AuthenticationFailed(texto)
-    
-    models.Transacciones_sucursal.objects.bulk_create(transacciones)
-    
-    return Response({'mensaje':'Guardado con exito'})
+                    establecimiento=row['establecimiento'],
+                    codigo_aval=row['codigo_aval'],
+                    codigo_incocredito=row['codigo_incocredito'],
+                    terminal=row['terminal'],
+                    fecha=fecha_dt,
+                    hora=row['hora'],
+                    nombre_convenio=row['nombre_convenio'],
+                    operacion=row['operacion'],
+                    fact_cta=row['fact_cta'],
+                    cod_aut=row['cod_aut'],
+                    valor=row['valor'] if row['operacion'] != 'Retiro' else -row['valor'],
+                    nura=row['nura'],
+                    esquema=row['esquema'],
+                    numero_tarjeta=row['numero_tarjeta'],
+                    comision=row['comision'],
+                ))
+            except Exception as e:
+                raise AuthenticationFailed(str(e))
+
+    # Guardar los registros únicos
+    if transacciones:
+        models.Transacciones_sucursal.objects.bulk_create(transacciones, batch_size=1000)
+
+    return Response({
+        'mensaje': 'Guardado con éxito',
+        'duplicados': duplicados_info,
+        'insertados': len(transacciones)
+    })
 
 @api_view(['POST'])
 def calcular_comisiones(request):
