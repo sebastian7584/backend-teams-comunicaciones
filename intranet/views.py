@@ -874,7 +874,7 @@ def guardar_datos_corresponsal(request):
     print(len(items))
     df =pd.DataFrame(items, columns=cabecera)
 
-    df.fillna("", inplace=True)
+    df.fillna("", inplace=True) 
     
     # Normalizar campos numéricos
     df['valor'] = df['valor'].replace("", "0").astype(int)
