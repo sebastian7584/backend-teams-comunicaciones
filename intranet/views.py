@@ -964,7 +964,10 @@ def guardar_datos_corresponsal(request):
         'insertados': len(transacciones)
     })
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> dfde8dae (Optimiza validación de duplicados en views.py)
 
 @api_view(['POST'])
 def calcular_comisiones(request):
