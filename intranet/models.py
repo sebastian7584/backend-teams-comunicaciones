@@ -168,6 +168,13 @@ class ActaRecibidoPor(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     cargo = models.CharField(max_length=100, null=True, blank=True)
 
+
+class ActaArchivos(models.Model):
+    acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
+    nombre_archivo = models.CharField(max_length=255)
+    ruta_archivo = models.CharField(max_length=500)
+
+
 class ActaArchivos(models.Model):
     acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
     nombre_archivo = models.CharField(max_length=255)
