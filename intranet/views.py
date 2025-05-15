@@ -518,22 +518,6 @@ def consignacion_corresponsal(request):
         payload = jwt.decode(token, 'secret', algorithms='HS256')
         usuario = User.objects.get(username=payload['id'])
 
-        # VALIDACIÓN CONTRA CUADRE
-        try:
-            cuadre = models.CuadreCaja.objects.get(fecha=fecha_consignacion, sucursal=sucursal)
-        except models.CuadreCaja.DoesNotExist:
-            return Response({'detail': 'No hay cuadre para esa fecha y sucursal'}, status=400)
-
-        valor_nuevo = consignacion_data.get('valor')
-        consignaciones_previas = models.Corresponsal_consignacion.objects.filter(
-            fecha=fecha_consignacion, codigo_incocredito=sucursal
-        )
-        valor_consignado = sum(t.valor for t in consignaciones_previas)
-        disponible_actual = cuadre.total_disponible - valor_consignado
-
-        if valor_nuevo > disponible_actual:
-            return Response({'detail': 'El valor excede el monto disponible del cuadre'}, status=400)
-
         # AUTENTICACIÓN CON MICROSOFT GRAPH
         tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
         client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
@@ -566,6 +550,7 @@ def consignacion_corresponsal(request):
         response = requests.put(upload_url, headers=headers, data=image.read())
 
         # CREAR LA CONSIGNACIÓN
+        valor_nuevo = consignacion_data.get('valor')
         estado = 'saldado' if consignacion_data.get('banco') == 'Corresponsal Banco de Bogota' else 'pendiente'
         detalle = consignacion_data.get('detalle') if consignacion_data.get('banco') != 'Otros bancos' else consignacion_data.get('bancoDetalle')
 
@@ -583,6 +568,7 @@ def consignacion_corresponsal(request):
         )
 
         return Response({'detail': 'Consignación registrada correctamente'})
+
 
 @api_view(['GET', 'POST', 'PUT'])
 def lista_usuarios(request):
