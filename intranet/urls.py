@@ -58,4 +58,6 @@ urlpatterns = [
     path('formulas/<int:id>/', views.formulas_prices),
     path('actas/', actas_entrega, name='actas_entrega'),  # Para GET y POST
     path('actas/<int:id>/', actas_entrega, name='actas_entrega_id'),  # Para GET, PUT, DELETE con id
+    path('api/imagen-login/', views.obtener_imagen_login),
+    path('api/imagen-login/actualizar/', views.actualizar_imagen_login),
 ]

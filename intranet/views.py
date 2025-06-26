@@ -38,7 +38,9 @@ from .serializers import ActaEntregaSerializer
 from . import models
 from django.contrib.auth import authenticate
 from rest_framework.pagination import PageNumberPagination
-
+import io
+from .models import ImagenLogin
+from .serializers import ImagenLoginSerializer
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
@@ -504,18 +506,20 @@ def select_consignaciones_corresponsal_cajero(request):
             })
     return Response({'total': f"${total_datos:,.2f}", 'detalles': data_transacciones})
 
+
+
 @api_view(['POST'])
 def consignacion_corresponsal(request):
     if request.method == 'POST':
         data = request.data
-        token = request.data['jwt']
+        token = data['jwt']
         image = request.FILES['image']
-        sucursal = request.data['sucursal']
+        sucursal = data['sucursal']
         consignacion_data = json.loads(request.POST.get('data'))
         fecha_consignacion = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date()
 
         # Validación del usuario
-        payload = jwt.decode(token, 'secret', algorithms='HS256')
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
         usuario = User.objects.get(username=payload['id'])
 
         # AUTENTICACIÓN CON MICROSOFT GRAPH
@@ -533,41 +537,67 @@ def consignacion_corresponsal(request):
         }
 
         response = requests.post(url, headers=headers, data=data2)
-
         if response.status_code == 200:
             access_token = response.json().get('access_token')
         else:
             raise AuthenticationFailed("Error al obtener token de acceso")
 
-        # SUBIDA DEL ARCHIVO A SHAREPOINT
+        # SUBIR IMAGEN A SHAREPOINT
         headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/octet-stream'
         }
+
         site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
         file_name = generate_unique_filename(image.name)
         upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
-        response = requests.put(upload_url, headers=headers, data=image.read())
 
-        # CREAR LA CONSIGNACIÓN
+        response = requests.put(upload_url, headers=headers, data=image.read())
+        if response.status_code >= 300:
+            raise AuthenticationFailed("Error al subir archivo a SharePoint")
+
+        # GUARDAR O ACTUALIZAR CONSIGNACIÓN
         valor_nuevo = consignacion_data.get('valor')
         estado = 'saldado' if consignacion_data.get('banco') == 'Corresponsal Banco de Bogota' else 'pendiente'
         detalle = consignacion_data.get('detalle') if consignacion_data.get('banco') != 'Otros bancos' else consignacion_data.get('bancoDetalle')
 
-        models.Corresponsal_consignacion.objects.create(
-            valor=valor_nuevo,
-            banco=consignacion_data.get('banco'),
-            fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
-            fecha=fecha_consignacion,
-            responsable=usuario.id,
-            estado=estado,
+        consignacion_existente = models.Corresponsal_consignacion.objects.filter(
             detalle=detalle,
-            url=file_name,
+            fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
             codigo_incocredito=sucursal,
-            detalle_banco=consignacion_data.get('proveedor'),
-        )
+            valor=valor_nuevo,
+        ).first()
+
+        if consignacion_existente:
+            consignacion_existente.banco = consignacion_data.get('banco')
+            consignacion_existente.fecha = fecha_consignacion
+            consignacion_existente.responsable = usuario.id
+            consignacion_existente.estado = estado
+            consignacion_existente.url = file_name
+            consignacion_existente.detalle_banco = consignacion_data.get('proveedor')
+            consignacion_existente.min = consignacion_data.get('min')
+            consignacion_existente.imei = consignacion_data.get('imei')
+            consignacion_existente.planilla = consignacion_data.get('planilla')
+            consignacion_existente.save()
+        else:
+            models.Corresponsal_consignacion.objects.create(
+                valor=valor_nuevo,
+                banco=consignacion_data.get('banco'),
+                fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
+                fecha=fecha_consignacion,
+                responsable=usuario.id,
+                estado=estado,
+                detalle=detalle,
+                url=file_name,
+                codigo_incocredito=sucursal,
+                detalle_banco=consignacion_data.get('proveedor'),
+                min=consignacion_data.get('min'),
+                imei=consignacion_data.get('imei'),
+                planilla=consignacion_data.get('planilla'),
+            )
 
         return Response({'detail': 'Consignación registrada correctamente'})
+
 
 
 @api_view(['GET', 'POST', 'PUT'])
@@ -622,9 +652,11 @@ def resumen_corresponsal(request):
     import datetime
     from django.utils import timezone
     import pandas as pd
+    from rest_framework.response import Response
+    from django.contrib.auth.models import User
 
     fecha = request.data.get('fecha')
-    sucursal = request.data.get('sucursal')  # puede ser '0', '-1' o código válido
+    sucursal = request.data.get('sucursal')
 
     if not fecha:
         return Response({'error': 'Fecha requerida'}, status=400)
@@ -653,7 +685,6 @@ def resumen_corresponsal(request):
 
     valor_total = sum(i.valor for i in transacciones)
 
-    # Obtener nombre de la sucursal (solo si es específica)
     nombre_sucursal = None
     if sucursal and sucursal not in ['0', '-1']:
         nombre_sucursal = models.Codigo_oficina.objects.get(codigo=sucursal).terminal
@@ -684,8 +715,12 @@ def resumen_corresponsal(request):
             'responsable': dic_usuarios.get(int(t.responsable), 'Desconocido'),
             'estado': t.estado,
             'detalle': t.detalle,
-            'url': t.url
+            'url': t.url,
+            'min': t.min,  
+            'imei': t.imei,  
+            'planilla': t.planilla  
         })
+
         if t.estado == 'pendiente':
             pendientes += t.valor
         elif t.estado == 'saldado':
@@ -703,6 +738,7 @@ def resumen_corresponsal(request):
         'consignaciones': transacciones_data
     }
     return Response(data)
+
 
 
 @api_view(['POST'])
@@ -726,6 +762,9 @@ def select_datos_corresponsal(request):
     else:
         fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
         fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+
+    fecha_inicio = timezone.make_aware(fecha_inicio, timezone.get_current_timezone())
+    fecha_fin = timezone.make_aware(fecha_fin, timezone.get_current_timezone())
 
     transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
     transacciones_data = [{
@@ -751,17 +790,25 @@ def select_datos_corresponsal(request):
     sucursales_dict = [{'value': i.codigo, 'text': i.terminal} for i in sucursales]
 
     df_transacciones = pd.DataFrame(transacciones_data)
+
+    if df_transacciones.empty:
+        return Response({
+            'consolidado': [],
+            'sucursales': sucursales_dict,
+            'data': []
+        })
+
     df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales)
     df_transacciones['cuenta'] = 1
 
+    # Limpiar y convertir valor a float
+    df_transacciones['valor_num'] = df_transacciones['valor'].replace('[\$,]', '', regex=True)
+    df_transacciones['valor_num'] = pd.to_numeric(df_transacciones['valor_num'], errors='coerce').fillna(0)
+
     df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({
         'cuenta': 'sum',
-        'valor': 'sum'
+        'valor_num': 'sum'
     }).reset_index()
-
-    if tamaño_fecha == 7:
-        fecha_inicio = timezone.make_aware(fecha_inicio, timezone.get_current_timezone())
-        fecha_fin = timezone.make_aware(fecha_fin, timezone.get_current_timezone())
 
     consignaciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
     consignaciones_data = [{
@@ -771,23 +818,37 @@ def select_datos_corresponsal(request):
     } for i in consignaciones]
 
     if consignaciones_data:
-        df_consignaciones = pd.DataFrame(consignaciones_data).pivot_table(
+        df_consignaciones = pd.DataFrame(consignaciones_data)
+        df_consignaciones['valor_num'] = df_consignaciones['valor'].replace('[\$,]', '', regex=True)
+        df_consignaciones['valor_num'] = pd.to_numeric(df_consignaciones['valor_num'], errors='coerce').fillna(0)
+        df_consignaciones_pivot = df_consignaciones.pivot_table(
             index='codigo_incocredito',
             columns='estado',
-            values='valor',
+            values='valor_num',
             aggfunc='sum'
         ).reset_index().fillna(0)
 
-        df_consolidado = pd.merge(df_consolidado, df_consignaciones, on='codigo_incocredito', how='outer')
+        df_consolidado = pd.merge(df_consolidado, df_consignaciones_pivot, on='codigo_incocredito', how='outer')
+    else:
+        df_consolidado['pendiente'] = 0
+        df_consolidado['saldado'] = 0
 
     df_consolidado = df_consolidado.fillna(0)
-    df_consolidado['valor'] = df_consolidado['valor'].apply(lambda x: f"${x:,.2f}")
-    if 'pendiente' in df_consolidado.columns:
-        df_consolidado['pendiente'] = df_consolidado['pendiente'].apply(lambda x: f"${x:,.2f}")
-    if 'saldado' in df_consolidado.columns:
-        df_consolidado['saldado'] = df_consolidado['saldado'].apply(lambda x: f"${x:,.2f}")
 
-    consolidado = df_consolidado.to_dict(orient='records')
+    # Asegurarse que las columnas existen
+    pendiente = df_consolidado['pendiente'] if 'pendiente' in df_consolidado.columns else 0
+    saldado = df_consolidado['saldado'] if 'saldado' in df_consolidado.columns else 0
+
+    df_consolidado['restante'] = df_consolidado['valor_num'] - (pendiente + saldado)
+
+    # Formatear para mostrar en frontend
+    df_consolidado['valor'] = df_consolidado['valor_num'].apply(lambda x: f"${x:,.2f}")
+    df_consolidado['pendiente'] = pendiente.apply(lambda x: f"${x:,.2f}")
+    df_consolidado['saldado'] = saldado.apply(lambda x: f"${x:,.2f}")
+    df_consolidado['restante'] = df_consolidado['restante'].apply(lambda x: f"${x:,.2f}")
+
+    consolidado = df_consolidado.drop(columns=['valor_num']).to_dict(orient='records')
+
     data_excel = [i | {'sucursal': cod_sucursales.get(i['codigo_incocredito'], 'Desconocida')} for i in transacciones_data]
 
     return Response({
@@ -795,6 +856,8 @@ def select_datos_corresponsal(request):
         'sucursales': sucursales_dict,
         'data': data_excel
     })
+
+
 
 
 @api_view(['POST'])
@@ -848,6 +911,7 @@ def select_datos_corresponsal_cajero(request):
             total_datos = total_datos + t.valor
     return Response({'total': f"${total_datos:,.2f}", 'sucursal': sucursal})
 
+
 @api_view(['POST'])
 def guardar_datos_corresponsal(request):
     import pandas as pd
@@ -857,31 +921,24 @@ def guardar_datos_corresponsal(request):
     cabecera = request.data['cabecera']
     items = request.data['items']
 
-    print(len(items))
-    df =pd.DataFrame(items, columns=cabecera)
-
+    df = pd.DataFrame(items, columns=cabecera)
     df.fillna("", inplace=True)
-    
-    # Normalizar campos numéricos
+
+    # Normalizar numéricos
     df['valor'] = df['valor'].replace("", "0").astype(int)
     df['nura'] = df['nura'].replace("", "0").astype(int)
     df['comision'] = df['comision'].replace("", "0").astype(int)
 
-    # Detectar rangos de fechas para filtrar posibles duplicados existentes
-    fecha_min = df['fecha'].min()
-    fecha_max = df['fecha'].max()
-
+    # Convertir fechas al formato datetime (para buscar en la BD)
     try:
-        fecha_min_dt = datetime.datetime.strptime(fecha_min, '%d/%m/%Y')
-        fecha_max_dt = datetime.datetime.strptime(fecha_max, '%d/%m/%Y')
+        fechas_parseadas = pd.to_datetime(df['fecha'], format='%d/%m/%Y')
     except:
-        fecha_min_dt = datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ')
-        fecha_max_dt = datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ')
+        fechas_parseadas = pd.to_datetime(df['fecha'])  # ISO u otro formato
 
-    fecha_minima = timezone.make_aware(fecha_min_dt)
-    fecha_maxima = timezone.make_aware(fecha_max_dt)
+    fecha_minima = timezone.make_aware(fechas_parseadas.min())
+    fecha_maxima = timezone.make_aware(fechas_parseadas.max())
 
-    # Obtener todos los registros existentes en ese rango de fechas
+    # Obtener duplicados existentes en BD (NO nos interesan más)
     registros_existentes = models.Transacciones_sucursal.objects.filter(
         fecha__range=(fecha_minima, fecha_maxima)
     ).values(
@@ -890,7 +947,6 @@ def guardar_datos_corresponsal(request):
         'esquema', 'numero_tarjeta', 'comision'
     )
 
-    # Convertir los registros existentes en un set de tuplas (más rápido para búsqueda)
     existentes_set = set(
         tuple((
             str(r['establecimiento']), str(r['codigo_aval']), str(r['codigo_incocredito']),
@@ -901,8 +957,11 @@ def guardar_datos_corresponsal(request):
         )) for r in registros_existentes
     )
 
-    duplicados_info = []
+    # Detectar duplicados INTERNOS
+    duplicados_set = set()
+    filas_vistas = set()
     transacciones = []
+    duplicados_info = []
 
     for index, row in df.iterrows():
         tupla_row = (
@@ -913,45 +972,47 @@ def guardar_datos_corresponsal(request):
             str(row['esquema']), str(row['numero_tarjeta']), int(row['comision'])
         )
 
-        if tupla_row in existentes_set:
-            duplicados_info.append({'linea': index + 2})
+        if tupla_row in filas_vistas:
+            duplicados_info.append({'linea': index + 2, 'razon': 'Duplicado en el archivo'})
+            continue  # No guardar duplicado
         else:
-            try:
-                # Parsear fecha al tipo adecuado
-                try:
-                    fecha_dt = datetime.datetime.strptime(row['fecha'], '%Y-%m-%dT%H:%M:%S.%fZ')
-                except:
-                    fecha_dt = datetime.datetime.strptime(row['fecha'], "%d/%m/%Y").date()
-                
-                transacciones.append(models.Transacciones_sucursal(
-                    establecimiento=row['establecimiento'],
-                    codigo_aval=row['codigo_aval'],
-                    codigo_incocredito=row['codigo_incocredito'],
-                    terminal=row['terminal'],
-                    fecha=fecha_dt,
-                    hora=row['hora'],
-                    nombre_convenio=row['nombre_convenio'],
-                    operacion=row['operacion'],
-                    fact_cta=row['fact_cta'],
-                    cod_aut=row['cod_aut'],
-                    valor=row['valor'] if row['operacion'] != 'Retiro' else -row['valor'],
-                    nura=row['nura'],
-                    esquema=row['esquema'],
-                    numero_tarjeta=row['numero_tarjeta'],
-                    comision=row['comision'],
-                ))
-            except Exception as e:
-                raise AuthenticationFailed(str(e))
+            filas_vistas.add(tupla_row)
 
-    # Guardar los registros únicos
-    if transacciones:
-        models.Transacciones_sucursal.objects.bulk_create(transacciones, batch_size=1000)
+        # No validamos contra la base de datos ya
+        try:
+            try:
+                fecha_dt = datetime.datetime.strptime(row['fecha'], '%Y-%m-%dT%H:%M:%S.%fZ')
+            except:
+                fecha_dt = datetime.datetime.strptime(row['fecha'], "%d/%m/%Y").date()
+
+            transacciones.append(models.Transacciones_sucursal(
+                establecimiento=row['establecimiento'],
+                codigo_aval=row['codigo_aval'],
+                codigo_incocredito=row['codigo_incocredito'],
+                terminal=row['terminal'],
+                fecha=fecha_dt,
+                hora=row['hora'],
+                nombre_convenio=row['nombre_convenio'],
+                operacion=row['operacion'],
+                fact_cta=row['fact_cta'],
+                cod_aut=row['cod_aut'],
+                valor=row['valor'] if row['operacion'] != 'Retiro' else -row['valor'],
+                nura=row['nura'],
+                esquema=row['esquema'],
+                numero_tarjeta=row['numero_tarjeta'],
+                comision=row['comision'],
+            ))
+        except Exception as e:
+            raise AuthenticationFailed(str(e))
 
     return Response({
-        'mensaje': 'Guardado con éxito',
+        'mensaje': 'Archivo analizado',
         'duplicados': duplicados_info,
-        'insertados': len(transacciones)
+        'items_filtrados': [list(r.values()) for r in df.iloc[[i for i in range(len(df)) if (tuple(df.iloc[i].values) not in duplicados_set and tuple(df.iloc[i].values) not in existentes_set)]].to_dict('records')],
+        'cabecera': cabecera
     })
+
+
 
 @api_view(['POST'])
 def calcular_comisiones(request):
@@ -2628,3 +2689,24 @@ def generate_unique_filename(filename):
             # Combinar para crear un nombre único
             unique_filename = f"{current_time}_{random_string}.{file_extension}"
             return unique_filename
+        
+@api_view(['GET'])
+def obtener_imagen_login(request):
+    try:
+        imagen = ImagenLogin.objects.latest('fecha')
+        serializer = ImagenLoginSerializer(imagen)
+        return Response(serializer.data)
+    except ImagenLogin.DoesNotExist:
+        return Response({'url': '/img-example.jpg'}, status=200)
+
+@api_view(['POST'])
+def actualizar_imagen_login(request):
+    url = request.data.get('url')
+    if not url:
+        return Response({'error': 'URL requerida'}, status=400)
+    
+    # Puedes eliminar las anteriores si solo quieres una
+    ImagenLogin.objects.all().delete()
+    
+    imagen = ImagenLogin.objects.create(url=url)
+    return Response({'mensaje': 'Imagen actualizada'})  

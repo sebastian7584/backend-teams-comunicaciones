@@ -122,6 +122,9 @@ class Corresponsal_consignacion(models.Model):
     url = models.URLField(blank=True, null=True)
     codigo_incocredito = models.CharField(max_length=100, null=True)
     detalle_banco = models.CharField(max_length=100, null=True)
+    min = models.CharField(max_length=20, blank=True, null=True)
+    imei = models.CharField(max_length=30, blank=True, null=True)
+    planilla = models.CharField(max_length=50, blank=True, null=True)
 
 class Lista_negra(models.Model):
     equipo = models.CharField(max_length=255, unique=True)
@@ -179,3 +182,7 @@ class ActaArchivos(models.Model):
     acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
     nombre_archivo = models.CharField(max_length=255)
     ruta_archivo = models.CharField(max_length=500)
+    
+class ImagenLogin(models.Model):
+    url = models.URLField()
+    fecha = models.DateTimeField(auto_now=True) 

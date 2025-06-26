@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ActaEntrega, ActaObjetivos, ActaObservaciones, ActaRecibidoPor, ActaArchivos, Proyecto
+from .models import ActaEntrega, ActaObjetivos, ActaObservaciones, ActaRecibidoPor, ActaArchivos, Proyecto, ImagenLogin
 
 class ProyectoSerializer(serializers.ModelSerializer):
     class Meta:
@@ -32,3 +32,8 @@ class ActaArchivosSerializer(serializers.ModelSerializer):
     class Meta:
         model = ActaArchivos
         fields = '__all__'
+        
+class ImagenLoginSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ImagenLogin
+        fields = ['id', 'url', 'fecha']
