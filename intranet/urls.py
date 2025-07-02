@@ -15,7 +15,7 @@ urlpatterns = [
     path('login', views.login),
     path('user-validate', views.user_validate),
     path('user-permissions', views.user_permissions),
-    path('permissions', views.permissions),
+    path('permissions-matrix', views.permissions_matrix),
     path('permissions-edit', views.permissions_edit),
     path('create-user', views.login),
     path('translate-products-prepago', views.translate_products_prepago),
