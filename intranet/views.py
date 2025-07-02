@@ -41,6 +41,8 @@ from rest_framework.pagination import PageNumberPagination
 import io
 from .models import ImagenLogin
 from .serializers import ImagenLoginSerializer
+from django.db import transaction
+
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
@@ -918,100 +920,101 @@ def guardar_datos_corresponsal(request):
     from django.utils import timezone
     import datetime
 
+    action = request.data.get('action', 'analyze') 
     cabecera = request.data['cabecera']
     items = request.data['items']
 
     df = pd.DataFrame(items, columns=cabecera)
     df.fillna("", inplace=True)
 
-    # Normalizar numéricos
-    df['valor'] = df['valor'].replace("", "0").astype(int)
-    df['nura'] = df['nura'].replace("", "0").astype(int)
-    df['comision'] = df['comision'].replace("", "0").astype(int)
+    if action == 'analyze':
 
-    # Convertir fechas al formato datetime (para buscar en la BD)
-    try:
-        fechas_parseadas = pd.to_datetime(df['fecha'], format='%d/%m/%Y')
-    except:
-        fechas_parseadas = pd.to_datetime(df['fecha'])  # ISO u otro formato
+        numeric_cols = ['valor', 'nura', 'comision']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
 
-    fecha_minima = timezone.make_aware(fechas_parseadas.min())
-    fecha_maxima = timezone.make_aware(fechas_parseadas.max())
-
-    # Obtener duplicados existentes en BD (NO nos interesan más)
-    registros_existentes = models.Transacciones_sucursal.objects.filter(
-        fecha__range=(fecha_minima, fecha_maxima)
-    ).values(
-        'establecimiento', 'codigo_aval', 'codigo_incocredito', 'terminal', 'fecha', 'hora',
-        'nombre_convenio', 'operacion', 'fact_cta', 'cod_aut', 'valor', 'nura',
-        'esquema', 'numero_tarjeta', 'comision'
-    )
-
-    existentes_set = set(
-        tuple((
-            str(r['establecimiento']), str(r['codigo_aval']), str(r['codigo_incocredito']),
-            str(r['terminal']), r['fecha'].strftime('%d/%m/%Y'), str(r['hora']),
-            str(r['nombre_convenio']), str(r['operacion']), str(r['fact_cta']),
-            str(r['cod_aut']), int(r['valor']), int(r['nura']),
-            str(r['esquema']), str(r['numero_tarjeta']), int(r['comision'])
-        )) for r in registros_existentes
-    )
-
-    # Detectar duplicados INTERNOS
-    duplicados_set = set()
-    filas_vistas = set()
-    transacciones = []
-    duplicados_info = []
-
-    for index, row in df.iterrows():
-        tupla_row = (
-            str(row['establecimiento']), str(row['codigo_aval']), str(row['codigo_incocredito']),
-            str(row['terminal']), row['fecha'], str(row['hora']),
-            str(row['nombre_convenio']), str(row['operacion']), str(row['fact_cta']),
-            str(row['cod_aut']), int(row['valor']), int(row['nura']),
-            str(row['esquema']), str(row['numero_tarjeta']), int(row['comision'])
-        )
-
-        if tupla_row in filas_vistas:
-            duplicados_info.append({'linea': index + 2, 'razon': 'Duplicado en el archivo'})
-            continue  # No guardar duplicado
-        else:
-            filas_vistas.add(tupla_row)
-
-        # No validamos contra la base de datos ya
         try:
+            fechas_parseadas = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce')
+        except Exception:
+            fechas_parseadas = pd.to_datetime(df['fecha'], errors='coerce')
+        
+        df.dropna(subset=['fecha'], inplace=True) 
+        
+        fecha_minima = timezone.make_aware(fechas_parseadas.min())
+        fecha_maxima = timezone.make_aware(fechas_parseadas.max())
+
+        registros_existentes = models.Transacciones_sucursal.objects.filter(
+            fecha__range=(fecha_minima, fecha_maxima)
+        ).values_list('establecimiento', 'terminal', 'fecha', 'cod_aut')
+        
+        existentes_set = set((str(r[0]), str(r[1]), r[2], str(r[3])) for r in registros_existentes)
+
+        items_filtrados = []
+        duplicados_info = []
+        filas_vistas = set()
+
+        for index, row in df.iterrows():
+            tupla_identificadora = (str(row['establecimiento']), str(row['terminal']), row['fecha'], str(row['cod_aut']))
+
+            if tupla_identificadora in filas_vistas:
+                duplicados_info.append({'linea': index + 2, 'razon': 'Duplicado dentro del mismo archivo'})
+                continue
+            
+            if tupla_identificadora in existentes_set:
+                duplicados_info.append({'linea': index + 2, 'razon': 'Ya existe en la Base de Datos'})
+                continue
+            
+            filas_vistas.add(tupla_identificadora)
+            items_filtrados.append(list(row))
+
+        return Response({
+            'mensaje': 'Archivo analizado',
+            'duplicados': duplicados_info,
+            'items_filtrados': items_filtrados,
+            'cabecera': cabecera
+        })
+
+    elif action == 'save':
+        transacciones_para_crear = []
+        for item_row in items:
+            row_dict = dict(zip(cabecera, item_row))
+
+            # Conversión de tipos
+            valor = int(row_dict.get('valor', 0))
+            fecha_str = row_dict.get('fecha', '')
             try:
-                fecha_dt = datetime.datetime.strptime(row['fecha'], '%Y-%m-%dT%H:%M:%S.%fZ')
-            except:
-                fecha_dt = datetime.datetime.strptime(row['fecha'], "%d/%m/%Y").date()
-
-            transacciones.append(models.Transacciones_sucursal(
-                establecimiento=row['establecimiento'],
-                codigo_aval=row['codigo_aval'],
-                codigo_incocredito=row['codigo_incocredito'],
-                terminal=row['terminal'],
-                fecha=fecha_dt,
-                hora=row['hora'],
-                nombre_convenio=row['nombre_convenio'],
-                operacion=row['operacion'],
-                fact_cta=row['fact_cta'],
-                cod_aut=row['cod_aut'],
-                valor=row['valor'] if row['operacion'] != 'Retiro' else -row['valor'],
-                nura=row['nura'],
-                esquema=row['esquema'],
-                numero_tarjeta=row['numero_tarjeta'],
-                comision=row['comision'],
-            ))
-        except Exception as e:
-            raise AuthenticationFailed(str(e))
-
-    return Response({
-        'mensaje': 'Archivo analizado',
-        'duplicados': duplicados_info,
-        'items_filtrados': [list(r.values()) for r in df.iloc[[i for i in range(len(df)) if (tuple(df.iloc[i].values) not in duplicados_set and tuple(df.iloc[i].values) not in existentes_set)]].to_dict('records')],
-        'cabecera': cabecera
-    })
-
+                fecha_dt = datetime.datetime.strptime(fecha_str, "%d/%m/%Y").date()
+            except ValueError:
+                # Intenta otros formatos si es necesario o sáltalo
+                continue
+            
+            transacciones_para_crear.append(
+                models.Transacciones_sucursal(
+                    establecimiento=row_dict.get('establecimiento', ''),
+                    codigo_aval=row_dict.get('codigo_aval', ''),
+                    codigo_incocredito=row_dict.get('codigo_incocredito', ''),
+                    terminal=row_dict.get('terminal', ''),
+                    fecha=fecha_dt,
+                    hora=row_dict.get('hora', '00:00:00'),
+                    nombre_convenio=row_dict.get('nombre_convenio', ''),
+                    operacion=row_dict.get('operacion', ''),
+                    fact_cta=row_dict.get('fact_cta', ''),
+                    cod_aut=row_dict.get('cod_aut', ''),
+                    valor= -valor if row_dict.get('operacion') == 'Retiro' else valor,
+                    nura=int(row_dict.get('nura', 0)),
+                    esquema=row_dict.get('esquema', ''),
+                    numero_tarjeta=row_dict.get('numero_tarjeta', ''),
+                    comision=int(row_dict.get('comision', 0)),
+                )
+            )
+        
+        if transacciones_para_crear:
+            models.Transacciones_sucursal.objects.bulk_create(transacciones_para_crear, ignore_conflicts=True)
+            
+        return Response({'mensaje': f'{len(transacciones_para_crear)} registros procesados.'}, status=200)
+    
+    return Response({'error': 'Acción no especificada o inválida.'}, status=400)
 
 
 @api_view(['POST'])
@@ -1802,87 +1805,102 @@ def cambio_clave(request):
         else:
             raise AuthenticationFailed('Las contraseñas deben ser iguales')
 
-@api_view(['POST'])
-def permissions(request):
-    if request.method == 'POST':
-        # new_permiso = models.Permisos.objects.create(
-        #         permiso ='informes',
-        #         active=True
-        #     )
-        # new_permiso.save()
-        response = Response()
-        response.set_cookie(key='jwts', value='hhh', httponly=True)
-        data = request.body
-        token = json.loads(data)
-        token = token['jwt']
-        if not token:
-            raise AuthenticationFailed('Debes estar logueado')
-        try:
-            payload = jwt.decode(token, 'secret', algorithms='HS256')
-            usuario = User.objects.get(username=payload['id'])
-            if usuario.is_superuser == False:
-                raise AuthenticationFailed('Debes ser superuser')
-            usuarios = list(User.objects.all())
-            data = []
-            for i in usuarios:
-                administrador = models.Permisos_usuarios.objects.filter(user=i.id, permiso=1)
-                control_interno = models.Permisos_usuarios.objects.filter(user=i.id, permiso=2)
-                gestion_humana = models.Permisos_usuarios.objects.filter(user=i.id, permiso=3)
-                contabilidad = models.Permisos_usuarios.objects.filter(user=i.id, permiso=4)
-                comisiones = models.Permisos_usuarios.objects.filter(user=i.id, permiso=5)
-                soporte = models.Permisos_usuarios.objects.filter(user=i.id, permiso=6)
-                auditoria = models.Permisos_usuarios.objects.filter(user=i.id, permiso=7)
-                comercial = models.Permisos_usuarios.objects.filter(user=i.id, permiso=8)
-                informes= models.Permisos_usuarios.objects.filter(user=i.id, permiso=9)
-                corresponsal= models.Permisos_usuarios.objects.filter(user=i.id, permiso=10)
-                data.append({
-                    'usuario': i.username,
-                    'administrador': administrador[0].tiene_permiso if len(administrador)>0 else False,
-                    'informes': informes[0].tiene_permiso if len(informes) >0 else False,
-                    'control_interno': control_interno[0].tiene_permiso if len(control_interno)>0 else False,
-                    'gestion_humana': gestion_humana[0].tiene_permiso if len(gestion_humana)>0 else False,
-                    'contabilidad': contabilidad[0].tiene_permiso if len(contabilidad)>0 else False,
-                    'comisiones': comisiones[0].tiene_permiso if len(comisiones)>0 else False,
-                    'soporte': soporte[0].tiene_permiso if len(soporte)>0 else False,
-                    'auditoria': auditoria[0].tiene_permiso if len(auditoria)>0 else False,
-                    'comercial': comercial[0].tiene_permiso if len(comercial)>0 else False,
-                    'corresponsal': comercial[0].tiene_permiso if len(corresponsal)>0 else False,
-                    })
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed('Debes estar logueado')
-        return Response({"usuarios": data})
-    
+@api_view(['GET'])
+def permissions_matrix(request):
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            raise AuthenticationFailed('Token de autorización faltante o con formato incorrecto.')
+        
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        
+        solicitante = User.objects.get(username=payload['id'])
+        if not solicitante.is_superuser:
+            raise AuthenticationFailed('Solo los superusuarios pueden ver los permisos.')
+
+        todos_los_permisos = list(models.Permisos.objects.all())
+        todos_los_usuarios = list(User.objects.all())
+        permisos_asignados = models.Permisos_usuarios.objects.filter(tiene_permiso=True).values('user_id', 'permiso__permiso')
+
+        roles_disponibles = [
+            {"name": p.permiso, "label": p.permiso.replace('_', ' ').capitalize()}
+            for p in todos_los_permisos
+        ]
+        
+        permisos_por_usuario = {}
+        for p_asignado in permisos_asignados:
+            user_id = p_asignado['user_id']
+            permiso_name = p_asignado['permiso__permiso']
+            if user_id not in permisos_por_usuario:
+                permisos_por_usuario[user_id] = set()
+            permisos_por_usuario[user_id].add(permiso_name)
+
+        usuarios_con_permisos = []
+        for usuario in todos_los_usuarios:
+            roles = {rol['name']: usuario.id in permisos_por_usuario and rol['name'] in permisos_por_usuario[usuario.id] 
+                     for rol in roles_disponibles}
+            usuarios_con_permisos.append({
+                'user_id': usuario.id,
+                'username': usuario.username,
+                'roles': roles
+            })
+        
+        return Response({
+            "roles": roles_disponibles,
+            "users_permissions": usuarios_con_permisos
+        })
+
+    except (AuthenticationFailed, User.DoesNotExist, jwt.ExpiredSignatureError, jwt.DecodeError) as e:
+        return Response({'detail': str(e)}, status=401)
+    except Exception as e:
+        return Response({'detail': f'Error inesperado: {str(e)}'}, status=500)
+
+
 @api_view(['POST'])
 def permissions_edit(request):
-    if request.method == 'POST':
-        response = Response()
-        response.set_cookie(key='jwts', value='hhh', httponly=True)
-        data = request.body
-        token = json.loads(data)
-        token = token['jwt']
-        if not token:
-            raise AuthenticationFailed('Debes estar logueado')
-        try:
-            payload = jwt.decode(token, 'secret', algorithms='HS256')
-            usuario = User.objects.get(username=payload['id'])
-            if usuario.is_superuser == False:
-                raise AuthenticationFailed('Debes ser superuser')
-            for i in request.data['data']:
-                user = User.objects.get(username=i['usuario'])
-                for key, value in i.items():
-                    if key != 'usuario':
-                        perm = models.Permisos.objects.get(permiso=key)
-                        permiso, created = models.Permisos_usuarios.objects.get_or_create(
-                            user = user,
-                            permiso = perm,
-                            defaults={'tiene_permiso': value}
-                        )
-                        if not created:
-                            permiso.tiene_permiso = value
-                            permiso.save()
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed('Debes estar logueado')
-        return Response({"message": 'guardado con exito'})
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            raise AuthenticationFailed('Token de autorización faltante o con formato incorrecto.')
+        
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        solicitante = User.objects.get(username=payload['id'])
+        if not solicitante.is_superuser:
+            raise AuthenticationFailed('Solo los superusuarios pueden editar permisos.')
+
+        with transaction.atomic():
+            data_a_guardar = request.data.get('data', [])
+            
+            user_ids = [item['user_id'] for item in data_a_guardar]
+            models.Permisos_usuarios.objects.filter(user_id__in=user_ids).delete()
+
+            permisos_a_crear = []
+            todos_los_permisos_map = {p.permiso: p for p in models.Permisos.objects.all()}
+            
+            for item_usuario in data_a_guardar:
+                user_id = item_usuario['user_id']
+                for permiso_name, tiene_permiso in item_usuario['roles'].items():
+                    if tiene_permiso:
+                        permiso_obj = todos_los_permisos_map.get(permiso_name)
+                        if permiso_obj:
+                            permisos_a_crear.append(
+                                models.Permisos_usuarios(
+                                    user_id=user_id,
+                                    permiso=permiso_obj,
+                                    tiene_permiso=True
+                                )
+                            )
+            
+            models.Permisos_usuarios.objects.bulk_create(permisos_a_crear)
+
+        return Response({"detail": "Permisos guardados con éxito"})
+
+    except (AuthenticationFailed, User.DoesNotExist, jwt.ExpiredSignatureError, jwt.DecodeError) as e:
+        return Response({'detail': str(e)}, status=401)
+    except Exception as e:
+        return Response({'detail': f'Error inesperado al guardar: {str(e)}'}, status=500)
     
 @api_view(['GET', 'POST'])
 def translate_products_prepago(request):
@@ -2073,257 +2091,208 @@ def translate_prepago(requests):
             # print(cabecera)
         return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
 
-@api_view(['PUT', 'POST'])
-def lista_productos_prepago_equipo(requests):
-    if requests.method == 'POST':
-        precio = requests.data['precio']
-        equipo = requests.data['equipo']
-        print(precio, equipo)
-        new_data = []
-        data = models.Lista_precio.objects.all()
-        df = pd.DataFrame(list(data.values()))
-        df['dia'] = pd.to_datetime(df['dia'])
-        df['valor'] = df['valor'].astype(float)
+@api_view(['POST'])
+def lista_productos_prepago_equipo(request):
+    try:
+        precio = request.data['precio']
+        equipo = request.data['equipo']
 
-        df_resultado = df[(df['producto'] == equipo) & (df['nombre'] == precio)]
+        qs = models.Lista_precio.objects.filter(
+            producto=equipo,
+            nombre=precio
+        ).order_by('-dia') 
+        if not qs.exists():
+            return Response({'data': []})
+
        
+        df = pd.DataFrame(list(qs.values()))
 
-        for index, row in df_resultado.iterrows():
-           
+        df.rename(columns={'valor': 'valor_actual'}, inplace=True)
+        df['valor_anterior'] = df['valor_actual'].shift(-1)
+        df['variation'] = df.apply(calcular_variacion, axis=1)
+
+        new_data = []
+        for _, row in df.iterrows():
             tem_data = {
-                'equipo': row['producto'],
-                'valor sin iva': '${:,.2f}'.format(row['valor']),
-                'fecha': row['dia'],
-    
+                'equipo': row.get('producto'),
+                'valor sin iva': f"${float(row.get('valor_actual', 0)):,.0f}", 
+                'fecha': row.get('dia'),
+                'variation': row.get('variation', 'neutral') 
             }
             new_data.append(tem_data)
         
-        print(new_data)
+        return Response({'data': new_data})
 
-        return Response({'data' : new_data})
+    except Exception as e:
+        print(f"ERROR en /lista-productos-prepago-equipo: {str(e)}")
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
+
+# views.py
 
 def calcular_variacion(row):
-    if pd.isna(row['valor_anterior']):
-        return 'neutral'
-    elif row['valor_actual'] > row['valor_anterior']:
-        dif = row['valor_actual'] - row['valor_anterior']
-        if row['valor_anterior'] > 0:
-            percentage = dif / row['valor_anterior']*100
-        else:
-            percentage = 0
-        percentage = f'{round(percentage, 2)}%'
-        return f'up-{dif}-{percentage}'
-    elif row['valor_actual'] < row['valor_anterior']:
-        dif = row['valor_anterior'] - row['valor_actual']
-        if row['valor_anterior'] > 0:
-            percentage = dif / row['valor_anterior']*100
-        else:
-            percentage = 0
-        percentage = f'{round(percentage, 2)}%'
-        return f'down-{dif}-{percentage}'
-    else:
+    valor_anterior_raw = row.get('valor_anterior')
+
+    # Si no hay valor anterior, es neutral
+    if pd.isna(valor_anterior_raw):
         return 'neutral'
 
-@api_view(['PUT', 'POST'])
+    # Aseguramos que ambos valores sean numéricos (float) para evitar errores
+    valor_actual = float(row.get('valor_actual', 0))
+    valor_anterior = float(valor_anterior_raw)
+
+    # Si los valores son iguales, es neutral
+    if valor_actual == valor_anterior:
+        return 'neutral'
+
+    elif valor_actual > valor_anterior:
+        dif = valor_actual - valor_anterior
+        # --- CÁLCULO CORREGIDO ---
+        # Aseguramos que el denominador sea el valor_anterior
+        if valor_anterior > 0:
+            percentage = (dif / valor_anterior) * 100
+        else:
+            percentage = 100.0 # Si el anterior era 0, el cambio es del 100%
+        
+        percentage_str = f'{round(percentage, 2)}%'
+        return f'up-{dif}-{percentage_str}'
+
+    elif valor_actual < valor_anterior:
+        dif = valor_anterior - valor_actual
+        # --- CÁLCULO CORREGIDO ---
+        # Aseguramos que el denominador sea el valor_anterior
+        if valor_anterior > 0:
+            percentage = (dif / valor_anterior) * 100
+        else:
+            percentage = 0 # No se puede calcular el cambio desde 0
+        
+        percentage_str = f'{round(percentage, 2)}%'
+        return f'down-{dif}-{percentage_str}'
+# views.py 
+
+@api_view(['GET', 'POST'])
 def lista_productos_prepago(request):
-    if request.method == 'PUT':
+    if request.method == 'GET':
         try:
-            # Validar si el token fue enviado
-            if 'jwt' not in request.data:
-                return Response({'error': 'Token no proporcionado'}, status=400)
-
-            token = request.data['jwt']
-
-            # Decodificar el token
-            try:
-                payload = jwt.decode(token, 'secret', algorithms='HS256')
-            except ExpiredSignatureError:
-                return Response({'error': 'Token expirado'}, status=401)
-            except InvalidTokenError:
-                return Response({'error': 'Token inválido'}, status=401)
-            except DecodeError:
-                return Response({'error': 'Error al decodificar el token'}, status=400)
-
-            usuario = User.objects.filter(username=payload.get('id')).first()
+            auth_header = request.headers.get('Authorization')
+            if not auth_header or not auth_header.startswith('Bearer '):
+                return Response({'detail': 'Falta el token de autorización o el formato es incorrecto.'}, status=401)
+            
+            token = auth_header.split(' ')[1]
+            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            
+            usuario = User.objects.get(username=payload.get('id'))
             if not usuario:
-                return Response({'error': 'Usuario no encontrado'}, status=404)
+                return Response({'detail': 'Usuario del token no encontrado'}, status=404)
 
-            # Mapeo de nombres de precios
             traduccion = {
-                'Precio publico': 'Precio Publico',
-                'Precio sub': 'Subdistribuidor',
-                'Precio premium': 'Premium',
-                'Precio Fintech': 'Fintech Zonificacion Subdistribuidores Y Externos',
-                'Precio Addi': 'Addi',
-                'Precio Flamingo': 'Flamingo',
-                'Precio Adelantos Valle': 'Precio Adelantos Valle',
-                'Costo': 'Costo',
+                'Precio publico': 'Precio Público', 'Precio sub': 'Subdistribuidor', 'Precio premium': 'Premium',
+                'Precio Fintech': 'Fintech Zonificación Subdistribuidores Y Externos', 'Precio Addi': 'Addi',
+                'Precio Flamingo': 'Flamingo', 'Precio Adelantos Valle': 'Precio Adelantos Valle', 'Costo': 'Costo',
             }
 
-            # Obtener los permisos de precios del usuario
-            listas = models.Permisos_usuarios_precio.objects.filter(user=usuario.id)
-            lista_precios = [{'id': i.permiso.permiso, 'nombre': traduccion.get(i.permiso.permiso, i.permiso.permiso)} for i in listas]
-            pass
-            pass
-            df_filtrado = df[df['nombre'] == precio]
-
-            df_filtrado_sorted = df_filtrado.sort_values(['producto', 'dia'], ascending=[True, False])
-            df_filtrado_sorted['rank'] = df_filtrado_sorted.groupby('producto').cumcount()
-
-            df_actual = df_filtrado_sorted[df_filtrado_sorted['rank'] == 0][['producto', 'valor']].rename(columns={'valor': 'valor_actual'})
-            df_anterior = df_filtrado_sorted[df_filtrado_sorted['rank'] == 1][['producto', 'valor']].rename(columns={'valor': 'valor_anterior'})
+            permisos_usuario = models.Permisos_usuarios_precio.objects.filter(user=usuario.id)
+            lista_precios = [
+                {'id': p.permiso.permiso, 'nombre': traduccion.get(p.permiso.permiso, p.permiso.permiso)} 
+                for p in permisos_usuario
+            ]
             
-            df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-            df_variacion = pd.merge(df_actual, df_anterior, on='producto', how='left')
-            
-            df_variacion['variation'] = df_variacion.apply(calcular_variacion, axis=1)
-            df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
+            return Response({'data': lista_precios})
         except Exception as e:
-            return Response({'error': f'Error interno: {str(e)}'}, status=500)
+            return Response({'detail': f'Error en GET: {str(e)}'}, status=500)
 
+
+    # --- BLOQUE POST TOTALMENTE REFACTORIZADO ---
     elif request.method == 'POST':
         try:
             precio = request.data.get('precio')
             if not precio:
                 return Response({'error': 'El campo "precio" es obligatorio'}, status=400)
 
-            # Obtener datos de la base de datos
             data = models.Lista_precio.objects.all()
+            if not data.exists():
+                return Response({'data': []})
+            
             df = pd.DataFrame(list(data.values()))
 
-            if df.empty:
-                return Response({'data': []})
+            # 1. Filtramos solo por la lista de precios seleccionada
+            df_precio = df[df['nombre'] == precio].copy()
+            df_precio['dia'] = pd.to_datetime(df_precio['dia']) # Aseguramos que 'dia' sea de tipo fecha
 
+            # 2. Ordenamos por producto y luego por fecha (la más reciente primero)
+            df_sorted = df_precio.sort_values(['producto', 'dia'], ascending=[True, False])
 
-            df_costo = df[df['nombre'] == 'Costo']
-            df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-            df_costo = df_costo.rename(columns={'valor': 'costo'})
-            df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
+            # 3. Creamos la columna 'valor_anterior' usando shift()
+            # Esto toma el valor de la fila de abajo (la anterior en el tiempo) y lo pone en la fila actual
+            df_sorted['valor_anterior'] = df_sorted.groupby('producto')['valor'].shift(-1)
             
-            df_resultado = pd.merge(df_resultado, df_variacion[['producto', 'variation']], on='producto', how='left')
+            # Renombramos 'valor' para claridad en la función 'calcular_variacion'
+            df_sorted.rename(columns={'valor': 'valor_actual'}, inplace=True)
 
+            # 4. Calculamos la variación directamente
+            df_sorted['variation'] = df_sorted.apply(calcular_variacion, axis=1)
 
-            # Filtros de productos y descuentos
-            df_descuentos = df[df['nombre'] == 'descuento'].sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).rename(columns={'valor': 'descuento'})
+            # 5. Nos quedamos solo con el registro más reciente de cada producto
+            df_resultado = df_sorted.drop_duplicates('producto', keep='first').reset_index(drop=True)
+            
+            # --- El resto de la lógica para añadir columnas y formatear la salida ---
+            df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto')[['producto', 'valor']].rename(columns={'valor': 'costo'})
+            df_descuento = df[df['nombre'] == 'descuento'].sort_values('dia', ascending=False).drop_duplicates('producto')[['producto', 'valor']].rename(columns={'valor': 'descuento'})
 
+            df_resultado = pd.merge(df_resultado, df_costo, on='producto', how='left')
+            df_resultado = pd.merge(df_resultado, df_descuento, on='producto', how='left')
+            df_resultado.fillna({'costo': 0, 'descuento': 0}, inplace=True)
 
-            df_precio = df[df['nombre'] == precio].sort_values('dia', ascending=False).drop_duplicates('producto')
-            df_precio = pd.merge(df_precio, df_descuentos[['producto', 'descuento']], on='producto', how='left')
+            sim = 2000
+            base = 1095578
+            new_data = []
 
+            for _, row in df_resultado.iterrows():
+                costo_val = float(row.get('costo', 0))
+                descuento_val = float(row.get('descuento', 0))
+                valor_val = float(row.get('valor_actual', 0)) # Usamos 'valor_actual'
 
-            for index, row in df_resultado.iterrows():
                 if precio == 'Costo':
                     tem_data = {
-                        'equipo': row['producto'],
-                        'costo': '${:,.2f}'.format(row['costo']),
-                        'descuento': '${:,.2f}'.format(row['descuento']),
-                        'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
+                        'equipo': row.get('producto'),
+                        'costo': f"${costo_val:,.2f}",
+                        'descuento': f"${descuento_val:,.2f}",
+                        'total': f"${costo_val - descuento_val:,.2f}",
+                        'variation': row.get('variation')
                     }
-                    tem_data['variation'] = row['variation']
-                    new_data.append(tem_data)
                 else:
-                    valor = row['valor']
-                    iva = row['valor'] * 0.19 if row['valor'] >= base else 0
-                    total = sim * 1.19 + valor + iva
+                    iva = valor_val * 0.19 if valor_val >= base else 0
+                    total = sim * 1.19 + valor_val + iva
                     tem_data = {
-                        'equipo': row['producto'],
-                        'precio simcard': '${:,.2f}'.format(sim),
-                        'IVA simcard': '${:,.2f}'.format(sim * 0.19),
-                        'equipo sin IVA': '${:,.2f}'.format(valor),
-                        'IVA equipo': '${:,.2f}'.format(iva),
+                        'equipo': row.get('producto'),
+                        'precio simcard': f"${sim:,.2f}",
+                        'IVA simcard': f"${sim * 0.19:,.2f}",
+                        'equipo sin IVA': f"${valor_val:,.2f}",
+                        'IVA equipo': f"${iva:,.2f}",
+                        'variation': row.get('variation')
                     }
-                    if precio == 'Precio sub':
-                        kit = row['kit sub']
-                        tem_data['KIT'] = kit
-                        total = total + kit
-                    elif precio == 'Precio Fintech':
-                        kit = row['kit fintech']
-                        tem_data['KIT'] = kit
-                        total = total + kit
-                    elif precio == 'Precio Addi':
-                        kit = row['kit addi']
-                        tem_data['KIT'] = kit
-                        total = total + kit
-                    elif precio == 'Precio Adelantos Valle':
-                        kit = row['kit valle']
-                        tem_data['KIT'] = kit
-                        total = total + kit
+
+                    kit_map = {
+                        'Precio sub': 'kit sub', 'Precio Fintech': 'kit fintech',
+                        'Precio Addi': 'kit addi', 'Precio Adelantos Valle': 'kit valle',
+                    }
+                    kit_col = kit_map.get(precio)
+                    if kit_col:
+                        kit_val = float(row.get(kit_col, 0))
+                        tem_data['KIT'] = kit_val
+                        total += kit_val
                     
-                    tem_data['total'] = '${:,.2f}'.format(total)
-                    tem_data['variation'] = row['variation']
-                    if precio == 'Precio publico':
-                        tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
-                    new_data.append(tem_data)
+                    tem_data['total'] = f"${total:,.2f}"
+                    if precio == 'Precio publico' and descuento_val > 0:
+                        tem_data['Promo'] = 'PROMO'
+                
+                new_data.append(tem_data)
 
-                # position = {1:'up', 2: 'down', 3: 'neutral'}
-                # new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
-
-
-                df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto').rename(columns={'valor': 'costo'})
-                df_precio = pd.merge(df_precio, df_costo[['producto', 'costo']], on='producto', how='left')
-
-                # Variables fijas
-                sim = 2000
-                base = 1095578
-                new_data = []
-
-
-                for _, row in df_precio.iterrows():
-                    if precio == 'Costo':
-                        new_data.append({
-                            'equipo': row['producto'],
-                            'costo': '${:,.2f}'.format(row['costo']),
-                            'descuento': '${:,.2f}'.format(row['descuento']),
-                            'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
-                        })
-                    else:
-                        valor = row['valor']
-                        iva = valor * 0.19 if valor >= base else 0
-                        total = sim * 1.19 + valor + iva
-
-                        tem_data = {
-                            'equipo': row['producto'],
-                            'precio simcard': '${:,.2f}'.format(sim),
-                            'IVA simcard': '${:,.2f}'.format(sim * 0.19),
-                            'equipo sin IVA': '${:,.2f}'.format(valor),
-                            'IVA equipo': '${:,.2f}'.format(iva),
-                        }
-
-                        # Asignar KIT según el precio
-                        if precio == 'Precio sub':
-                            kit = row['kit sub']
-                        elif precio == 'Precio Fintech':
-                            kit = row['kit fintech']
-                        elif precio == 'Precio Addi':
-                            kit = row['kit addi']
-                        elif precio == 'Precio Adelantos Valle':
-                            kit = row['kit valle']
-                        else:
-                            kit = 0
-
-                        if kit:
-                            tem_data['KIT'] = '${:,.2f}'.format(kit)
-                            total += kit
-
-                        tem_data['total'] = '${:,.2f}'.format(total)
-
-                        # Promo si hay descuento
-                        if precio == 'Precio publico' and row['descuento'] > 0:
-                            tem_data['Promo'] = 'PROMO'
-                        else:
-                            tem_data['Promo'] = 'NO'
-
-                        new_data.append(tem_data)
-
-                # Variación aleatoria en precios
-                position = {1: 'up', 2: 'down', 3: 'neutral'}
-                new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
-
-                return Response({'data': new_data})
-
+            return Response({'data': new_data})
 
         except Exception as e:
-            return Response({'error': f'Error interno: {str(e)}'}, status=500)
+            # Añadimos un print en el servidor para facilitar la depuración futura
+            print(f"ERROR EN POST /lista-productos-prepago: {str(e)}")
+            return Response({'error': f'Error interno en la petición POST: {str(e)}'}, status=500)
 
 class UpdatePrices:
 
