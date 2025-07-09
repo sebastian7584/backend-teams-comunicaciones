@@ -42,7 +42,7 @@ import io
 from .models import ImagenLogin
 from .serializers import ImagenLoginSerializer
 from django.db import transaction
-
+from django.db.models import Sum
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
@@ -382,39 +382,67 @@ def black_list(request, id=None):
 
 
 @api_view(['POST'])
+@transaction.atomic
 def settle_invoice(request):
-    total = request.data['total']
-    saldar = request.data['saldar']
-    seleccionados = request.data['seleccionados']
-    fecha = request.data['fecha']
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        fecha = fecha + "-01"
-    token = request.data['jwt']
-    sucursal = request.data['sucursal']
-    sucursal_id = models.Codigo_oficina.objects.get(codigo=sucursal)
-    payload = jwt.decode(token, 'secret', algorithms='HS256')
-    usuario = User.objects.get(username=payload['id'])
-    referencias = []
-    for select in seleccionados:
-        referencias.append(f"{select['id']}")
-        consignacion = models.Corresponsal_consignacion.objects.get(id=select['id'])
-        consignacion.estado = 'saldado'
-        consignacion.save()
-    referencias_text = '-'.join(referencias) if len(referencias) > 1 else f"{referencias[0]}"
-    models.Corresponsal_consignacion.objects.create(
-            valor = total,
-            banco = 'Corresponsal Banco de Bogota',
-            fecha_consignacion = datetime.datetime.strptime(saldar['fechaConsignacion'], '%Y-%m-%d').date(),
-            fecha = datetime.datetime.strptime(fecha, '%Y-%m-%d').date(),
-            responsable = usuario.id,
-            estado = 'Conciliado',
-            detalle = saldar['detalle'],
-            url = '',
-            codigo_incocredito = sucursal_id.terminal,
-            detalle_banco = referencias_text,
+    try:
+        consignacion_ids = request.data.get('ids', [])
+        saldar_data = request.data.get('saldar_data', {})
+        jwt_token = request.data.get('jwt')
+        sucursal_code = request.data.get('sucursal')
+        fecha_str = request.data.get('fecha')
+
+        if not all([consignacion_ids, saldar_data, jwt_token, sucursal_code, fecha_str]):
+            return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
+
+        payload = jwt.decode(jwt_token, 'secret', algorithms=['HS256'])
+        usuario = User.objects.get(username=payload['id'])
+        
+        sucursal_obj = models.Codigo_oficina.objects.get(codigo=sucursal_code)
+
+        consignaciones_a_saldar = models.Corresponsal_consignacion.objects.filter(
+            id__in=consignacion_ids, 
+            estado='pendiente'
         )
-    return Response([])
+
+        if len(consignaciones_a_saldar) != len(consignacion_ids):
+             return Response({'detail': 'Algunas consignaciones no se encontraron o ya fueron saldadas.'}, status=400)
+
+        total_calculado = sum(c.valor for c in consignaciones_a_saldar)
+
+        for consignacion in consignaciones_a_saldar:
+            consignacion.estado = 'saldado'
+            consignacion.save()
+
+        if len(fecha_str) == 7:
+            fecha_obj = datetime.datetime.strptime(fecha_str + "-01", '%Y-%m-%d').date()
+        else:
+            fecha_obj = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
+
+        referencias_text = ','.join(map(str, consignacion_ids))
+
+        models.Corresponsal_consignacion.objects.create(
+            valor=total_calculado,
+            banco='Corresponsal Banco de Bogota',
+            fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
+            fecha=fecha_obj,
+            responsable=usuario.id,
+            estado='Conciliado',
+            detalle=saldar_data['detalle'],
+            url='',
+            codigo_incocredito=sucursal_obj.terminal,
+            detalle_banco=referencias_text,
+        )
+
+        return Response({'detail': 'Consignaciones saldadas correctamente.'}, status=200)
+
+    except User.DoesNotExist:
+        return Response({'detail': 'El usuario del token no es válido.'}, status=401)
+    except models.Codigo_oficina.DoesNotExist:
+        return Response({'detail': 'La sucursal especificada no existe.'}, status=404)
+    except Exception as e:
+        print(f"ERROR en settle_invoice: {str(e)}")
+        return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
+
 
 @api_view(['POST'])
 def assign_responsible(request):
@@ -509,97 +537,87 @@ def select_consignaciones_corresponsal_cajero(request):
     return Response({'total': f"${total_datos:,.2f}", 'detalles': data_transacciones})
 
 
+def generate_unique_filename(original_name):
+    import uuid
+    from pathlib import Path
+    extension = Path(original_name).suffix
+    return f"{uuid.uuid4()}{extension}"
 
 @api_view(['POST'])
 def consignacion_corresponsal(request):
     if request.method == 'POST':
-        data = request.data
-        token = data['jwt']
-        image = request.FILES['image']
-        sucursal = data['sucursal']
-        consignacion_data = json.loads(request.POST.get('data'))
-        fecha_consignacion = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date()
+        try:
+            data = request.data
+            token = data.get('jwt')
+            image = request.FILES.get('image')
+            sucursal = data.get('sucursal')
+            consignacion_data = json.loads(request.POST.get('data'))
+            fecha_reporte = datetime.datetime.strptime(data.get('fecha'), '%Y-%m-%d').date()
 
-        # Validación del usuario
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
-        usuario = User.objects.get(username=payload['id'])
+            if not all([token, image, sucursal, consignacion_data]):
+                return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
 
-        # AUTENTICACIÓN CON MICROSOFT GRAPH
-        tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
-        client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-        client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
-        url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            usuario = User.objects.get(username=payload['id'])
 
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        data2 = {
-            'grant_type': 'client_credentials',
-            'client_id': client_id,
-            'client_secret': client_secret,
-            'scope': 'https://graph.microsoft.com/.default'
-        }
+            tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
+            client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
+            client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
+            url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+            data_ms = {
+                'grant_type': 'client_credentials', 'client_id': client_id,
+                'client_secret': client_secret, 'scope': 'https://graph.microsoft.com/.default'
+            }
+            response_ms = requests.post(url, headers=headers, data=data_ms)
+            response_ms.raise_for_status()
+            access_token = response_ms.json().get('access_token')
 
-        response = requests.post(url, headers=headers, data=data2)
-        if response.status_code == 200:
-            access_token = response.json().get('access_token')
-        else:
-            raise AuthenticationFailed("Error al obtener token de acceso")
+            headers_sp = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/octet-stream'}
+            site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
+            file_name = generate_unique_filename(image.name)
+            upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
+            response_upload = requests.put(upload_url, headers=headers_sp, data=image.read())
+            response_upload.raise_for_status()
 
-        # SUBIR IMAGEN A SHAREPOINT
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/octet-stream'
-        }
+            banco_categoria = consignacion_data.get('banco')
+            
+            
+            estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
 
-        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
-        file_name = generate_unique_filename(image.name)
-        upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
+            detalle_banco_valor = None
+            if banco_categoria in ['Proveedores', 'Obligaciones financieras']:
+                detalle_banco_valor = consignacion_data.get('proveedor')
+            elif banco_categoria == 'Otros bancos':
+                detalle_banco_valor = consignacion_data.get('bancoDetalle')
+            elif banco_categoria == 'Impuestos':
+                detalle_banco_valor = consignacion_data.get('impuestoDetalle')
 
-        response = requests.put(upload_url, headers=headers, data=image.read())
-        if response.status_code >= 300:
-            raise AuthenticationFailed("Error al subir archivo a SharePoint")
-
-        # GUARDAR O ACTUALIZAR CONSIGNACIÓN
-        valor_nuevo = consignacion_data.get('valor')
-        estado = 'saldado' if consignacion_data.get('banco') == 'Corresponsal Banco de Bogota' else 'pendiente'
-        detalle = consignacion_data.get('detalle') if consignacion_data.get('banco') != 'Otros bancos' else consignacion_data.get('bancoDetalle')
-
-        consignacion_existente = models.Corresponsal_consignacion.objects.filter(
-            detalle=detalle,
-            fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
-            codigo_incocredito=sucursal,
-            valor=valor_nuevo,
-        ).first()
-
-        if consignacion_existente:
-            consignacion_existente.banco = consignacion_data.get('banco')
-            consignacion_existente.fecha = fecha_consignacion
-            consignacion_existente.responsable = usuario.id
-            consignacion_existente.estado = estado
-            consignacion_existente.url = file_name
-            consignacion_existente.detalle_banco = consignacion_data.get('proveedor')
-            consignacion_existente.min = consignacion_data.get('min')
-            consignacion_existente.imei = consignacion_data.get('imei')
-            consignacion_existente.planilla = consignacion_data.get('planilla')
-            consignacion_existente.save()
-        else:
             models.Corresponsal_consignacion.objects.create(
-                valor=valor_nuevo,
-                banco=consignacion_data.get('banco'),
+                valor=consignacion_data.get('valor'),
+                banco=banco_categoria,
                 fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
-                fecha=fecha_consignacion,
+                fecha=fecha_reporte,
                 responsable=usuario.id,
                 estado=estado,
-                detalle=detalle,
+                detalle=consignacion_data.get('detalle'),
                 url=file_name,
                 codigo_incocredito=sucursal,
-                detalle_banco=consignacion_data.get('proveedor'),
-                min=consignacion_data.get('min'),
-                imei=consignacion_data.get('imei'),
-                planilla=consignacion_data.get('planilla'),
+                detalle_banco=detalle_banco_valor,
+                min=consignacion_data.get('min') if banco_categoria == 'Venta doble proposito' else None,
+                imei=consignacion_data.get('imei') if banco_categoria == 'Venta doble proposito' else None,
+                planilla=consignacion_data.get('planilla') if banco_categoria == 'Venta doble proposito' else None,
             )
 
-        return Response({'detail': 'Consignación registrada correctamente'})
-
+            return Response({'detail': 'Consignación registrada correctamente'}, status=200)
+            
+        except User.DoesNotExist:
+            return Response({'detail': 'Usuario no válido'}, status=401)
+        except requests.exceptions.RequestException as e:
+            return Response({'detail': f'Error de comunicación con Microsoft Graph: {e}'}, status=503)
+        except Exception as e:
+            print(f"ERROR en consignacion_corresponsal: {str(e)}")
+            return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
 
 
 @api_view(['GET', 'POST', 'PUT'])
@@ -651,96 +669,94 @@ def encargados_corresponsal(request):
 
 @api_view(['POST'])
 def resumen_corresponsal(request):
-    import datetime
-    from django.utils import timezone
-    import pandas as pd
-    from rest_framework.response import Response
-    from django.contrib.auth.models import User
+    try:
+        fecha_str = request.data.get('fecha')
+        sucursal_code = request.data.get('sucursal')
 
-    fecha = request.data.get('fecha')
-    sucursal = request.data.get('sucursal')
+        if not fecha_str:
+            return Response({'error': 'Fecha requerida'}, status=400)
 
-    if not fecha:
-        return Response({'error': 'Fecha requerida'}, status=400)
-
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        año, mes = map(int, fecha.split('-'))
-        fecha_inicio = datetime.datetime(año, mes, 1)
-        if mes == 12:
-            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
+        if len(fecha_str) == 7:
+            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
+            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
         else:
-            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
-    else:
-        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+            fecha_inicio_naive = datetime.datetime.strptime(fecha_str, '%Y-%m-%d')
+            fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
 
-    if sucursal and sucursal not in ['0', '-1']:
-        transacciones = models.Transacciones_sucursal.objects.filter(
-            fecha__range=(fecha_inicio, fecha_fin),
-            codigo_incocredito=sucursal
+        fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+        fecha_fin = timezone.make_aware(fecha_fin_naive)
+        
+        usuarios_dict = {user.id: user.username for user in User.objects.all()}
+
+        consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
+            fecha_consignacion__range=(fecha_inicio, fecha_fin)
         )
-    else:
-        transacciones = models.Transacciones_sucursal.objects.filter(
+
+        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(
             fecha__range=(fecha_inicio, fecha_fin)
         )
+        
+        if sucursal_code and sucursal_code not in ['0', '-1']:
+            sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
+            if sucursal_obj:
+                consignaciones_qs = consignaciones_qs.filter(codigo_incocredito=sucursal_obj.terminal)
+                transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_code)
+                titulo = sucursal_obj.terminal
+            else:
+                titulo = 'Sucursal Desconocida'
+        else:
+            titulo = 'Todas las sucursales'
 
-    valor_total = sum(i.valor for i in transacciones)
+        transacciones_data = []
+        for t in consignaciones_qs:
+            banco = getattr(t, 'banco', '')
+            
+            detalle_categoria = getattr(t, 'detalle_banco', '') or ''
+            
+            if banco == 'Venta doble proposito':
+                imei = getattr(t, 'imei', '') or ''
+                if imei:
+                    detalle_categoria = f"IMEI: {imei}"
 
-    nombre_sucursal = None
-    if sucursal and sucursal not in ['0', '-1']:
-        nombre_sucursal = models.Codigo_oficina.objects.get(codigo=sucursal).terminal
+            responsable_id = getattr(t, 'responsable', None)
+            responsable_username = 'Desconocido'
+            if responsable_id:
+                try:
+                    responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
+                except (ValueError, TypeError):
+                    pass
 
-    if nombre_sucursal:
-        transacciones2 = models.Corresponsal_consignacion.objects.filter(
-            fecha__range=(fecha_inicio, fecha_fin),
-            codigo_incocredito=nombre_sucursal
-        )
-    else:
-        transacciones2 = models.Corresponsal_consignacion.objects.filter(
-            fecha__range=(fecha_inicio, fecha_fin)
-        )
+            transacciones_data.append({
+                'id': t.id,
+                'valor': getattr(t, 'valor', 0) or 0,
+                'banco': banco,
+                'fecha_consignacion': t.fecha_consignacion,
+                'responsable': responsable_username,
+                'estado': getattr(t, 'estado', ''),
+                'detalle': getattr(t, 'detalle', '') or '',
+                'sucursal_nombre': getattr(t, 'codigo_incocredito', ''),
+                'detalle_categoria': detalle_categoria,
+                'url': getattr(t, 'url', None),
+            })
 
-    total_datos2 = 0
-    pendientes = 0
-    transacciones_data = []
-    usuarios = User.objects.all()
-    dic_usuarios = {i.id: i.username for i in usuarios}
+        valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
+        
+        total_consignado_saldado = sum(t['valor'] for t in transacciones_data if t['estado'] in ['saldado', 'Conciliado'])
+        total_consignado_pendiente = sum(t['valor'] for t in transacciones_data if t['estado'] == 'pendiente')
+        
+        data = {
+            'valor': valor_total_cajero,
+            'titulo': titulo,
+            'consignacion': total_consignado_saldado,
+            'pendiente': total_consignado_pendiente,
+            'restante': valor_total_cajero - total_consignado_saldado - total_consignado_pendiente,
+            'consignaciones': transacciones_data
+        }
+        return Response(data)
 
-    for t in transacciones2:
-        transacciones_data.append({
-            'id': t.id,
-            'valor': f"${t.valor:,.2f}",
-            'banco': t.banco,
-            'fecha_consignacion': t.fecha_consignacion,
-            'fecha': t.fecha,
-            'responsable': dic_usuarios.get(int(t.responsable), 'Desconocido'),
-            'estado': t.estado,
-            'detalle': t.detalle,
-            'url': t.url,
-            'min': t.min,  
-            'imei': t.imei,  
-            'planilla': t.planilla  
-        })
-
-        if t.estado == 'pendiente':
-            pendientes += t.valor
-        elif t.estado == 'saldado':
-            total_datos2 += t.valor
-
-    sucursal_codigo = models.Codigo_oficina.objects.filter(codigo=sucursal).first() if sucursal not in ['0', '-1'] else None
-    titulo = sucursal_codigo.terminal if sucursal_codigo else 'Todas las sucursales'
-
-    data = {
-        'valor': f"${valor_total:,.2f}",
-        'titulo': titulo,
-        'consignacion': f"${total_datos2:,.2f}",
-        'pendiente': f"${pendientes:,.2f}",
-        'restante': f"${valor_total - total_datos2 - pendientes:,.2f}",
-        'consignaciones': transacciones_data
-    }
-    return Response(data)
-
+    except Exception as e:
+        print(f"ERROR en resumen_corresponsal: {str(e)}")
+        return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
 
 
 @api_view(['POST'])
@@ -753,110 +769,76 @@ def select_datos_corresponsal(request):
     if not fecha:
         return Response({'error': 'Fecha requerida'}, status=400)
 
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        año, mes = map(int, fecha.split('-'))
-        fecha_inicio = datetime.datetime(año, mes, 1)
-        if mes == 12:
-            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
-        else:
-            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
+    if len(fecha) == 7:
+        fecha_inicio = pd.to_datetime(fecha).to_pydatetime()
+        fecha_fin = fecha_inicio + pd.offsets.MonthEnd(1)
     else:
         fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        fecha_fin = fecha_inicio.replace(hour=23, minute=59, second=59)
 
     fecha_inicio = timezone.make_aware(fecha_inicio, timezone.get_current_timezone())
     fecha_fin = timezone.make_aware(fecha_fin, timezone.get_current_timezone())
 
     transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
-    transacciones_data = [{
-        'establecimiento': t.establecimiento,
-        'codigo_aval': t.codigo_aval,
-        'codigo_incocredito': t.codigo_incocredito,
-        'terminal': t.terminal,
-        'fecha': t.fecha.strftime('%d/%m/%Y'),
-        'hora': t.hora,
-        'nombre_convenio': t.nombre_convenio,
-        'operacion': t.operacion,
-        'fact_cta': t.fact_cta,
-        'cod_aut': t.cod_aut,
-        'valor': t.valor,
-        'nura': t.nura,
-        'esquema': t.esquema,
-        'numero_tarjeta': t.numero_tarjeta,
-        'comision': t.comision,
-    } for t in transacciones]
+    transacciones_data = list(transacciones.values(
+        'establecimiento', 'codigo_aval', 'codigo_incocredito', 'terminal', 
+        'fecha', 'hora', 'nombre_convenio', 'operacion', 'fact_cta', 
+        'cod_aut', 'valor', 'nura', 'esquema', 'numero_tarjeta', 'comision'
+    ))
 
     sucursales = models.Codigo_oficina.objects.all()
-    cod_sucursales = {i.codigo: i.terminal for i in sucursales}
     sucursales_dict = [{'value': i.codigo, 'text': i.terminal} for i in sucursales]
 
-    df_transacciones = pd.DataFrame(transacciones_data)
-
-    if df_transacciones.empty:
+    if not transacciones_data:
         return Response({
             'consolidado': [],
             'sucursales': sucursales_dict,
             'data': []
         })
 
-    df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales)
-    df_transacciones['cuenta'] = 1
+    df_transacciones = pd.DataFrame(transacciones_data)
+    df_transacciones['valor'] = pd.to_numeric(df_transacciones['valor'], errors='coerce').fillna(0)
+    
+    df_consolidado = df_transacciones.groupby('codigo_incocredito').agg(
+        cuenta=('codigo_incocredito', 'size'),
+        valor=('valor', 'sum')
+    ).reset_index()
 
-    # Limpiar y convertir valor a float
-    df_transacciones['valor_num'] = df_transacciones['valor'].replace('[\$,]', '', regex=True)
-    df_transacciones['valor_num'] = pd.to_numeric(df_transacciones['valor_num'], errors='coerce').fillna(0)
-
-    df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({
-        'cuenta': 'sum',
-        'valor_num': 'sum'
-    }).reset_index()
-
-    consignaciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
-    consignaciones_data = [{
-        'codigo_incocredito': i.codigo_incocredito,
-        'estado': i.estado,
-        'valor': i.valor
-    } for i in consignaciones]
-
-    if consignaciones_data:
-        df_consignaciones = pd.DataFrame(consignaciones_data)
-        df_consignaciones['valor_num'] = df_consignaciones['valor'].replace('[\$,]', '', regex=True)
-        df_consignaciones['valor_num'] = pd.to_numeric(df_consignaciones['valor_num'], errors='coerce').fillna(0)
+    consignaciones = models.Corresponsal_consignacion.objects.filter(fecha_consignacion__range=(fecha_inicio, fecha_fin))
+    
+    if consignaciones.exists():
+        df_consignaciones = pd.DataFrame(list(consignaciones.values('codigo_incocredito', 'estado', 'valor')))
+        df_consignaciones['valor'] = pd.to_numeric(df_consignaciones['valor'], errors='coerce').fillna(0)
+        
         df_consignaciones_pivot = df_consignaciones.pivot_table(
             index='codigo_incocredito',
             columns='estado',
-            values='valor_num',
+            values='valor',
             aggfunc='sum'
         ).reset_index().fillna(0)
 
-        df_consolidado = pd.merge(df_consolidado, df_consignaciones_pivot, on='codigo_incocredito', how='outer')
+        df_consolidado = pd.merge(df_consolidado, df_consignaciones_pivot, on='codigo_incocredito', how='outer').fillna(0)
     else:
         df_consolidado['pendiente'] = 0
         df_consolidado['saldado'] = 0
+        df_consolidado['Conciliado'] = 0
+    
+    for col in ['pendiente', 'saldado', 'Conciliado']:
+        if col not in df_consolidado.columns:
+            df_consolidado[col] = 0
 
-    df_consolidado = df_consolidado.fillna(0)
-
-    # Asegurarse que las columnas existen
-    pendiente = df_consolidado['pendiente'] if 'pendiente' in df_consolidado.columns else 0
-    saldado = df_consolidado['saldado'] if 'saldado' in df_consolidado.columns else 0
-
-    df_consolidado['restante'] = df_consolidado['valor_num'] - (pendiente + saldado)
-
-    # Formatear para mostrar en frontend
-    df_consolidado['valor'] = df_consolidado['valor_num'].apply(lambda x: f"${x:,.2f}")
-    df_consolidado['pendiente'] = pendiente.apply(lambda x: f"${x:,.2f}")
-    df_consolidado['saldado'] = saldado.apply(lambda x: f"${x:,.2f}")
-    df_consolidado['restante'] = df_consolidado['restante'].apply(lambda x: f"${x:,.2f}")
-
-    consolidado = df_consolidado.drop(columns=['valor_num']).to_dict(orient='records')
-
-    data_excel = [i | {'sucursal': cod_sucursales.get(i['codigo_incocredito'], 'Desconocida')} for i in transacciones_data]
-
+    df_consolidado['saldado_total'] = df_consolidado['saldado'] + df_consolidado['Conciliado']
+    df_consolidado['restante'] = df_consolidado['valor'] - df_consolidado['pendiente'] - df_consolidado['saldado_total']
+    
+    df_consolidado = df_consolidado.rename(columns={'saldado_total': 'saldado'})
+    
+    columnas_finales = ['codigo_incocredito', 'cuenta', 'valor', 'pendiente', 'saldado', 'restante']
+    consolidado = df_consolidado[columnas_finales].to_dict(orient='records')
+    
     return Response({
         'consolidado': consolidado,
         'sucursales': sucursales_dict,
-        'data': data_excel
+        'data': transacciones_data
     })
 
 
@@ -864,54 +846,45 @@ def select_datos_corresponsal(request):
 
 @api_view(['POST'])
 def select_datos_corresponsal_cajero(request):
+    import datetime
+    import jwt
+    from django.contrib.auth.models import User
+
     fecha = request.data['fecha']
     token = request.data['jwt']
-    payload = jwt.decode(token, 'secret', algorithms='HS256')
-    user = User.objects.get(username = payload['id'])
-    sucursales = models.Responsable_corresponsal.objects.all()
-    sucursal = ''
-    for i in sucursales:
-        if i.user.username == user.username:
-            sucursal = i.sucursal.terminal
-            break
-    # sucursal = request.data['sucursal']
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
+    payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+    user = User.objects.get(username=payload['id'])
+    
+    try:
+        responsable = models.Responsable_corresponsal.objects.get(user=user)
+        sucursal_terminal = responsable.sucursal.terminal
+    except models.Responsable_corresponsal.DoesNotExist:
+        return Response({'error': 'Usuario no asignado a ninguna sucursal'}, status=404)
+
+    if len(fecha) == 7:
         año, mes = map(int, fecha.split('-'))
-        fecha_inicio = datetime.datetime(año, mes, 1)
-        if mes == 12:
-            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
-        else:
-            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
+        fecha_inicio = datetime.date(año, mes, 1)
+        next_month = mes + 1 if mes < 12 else 1
+        next_year = año if mes < 12 else año + 1
+        fecha_fin = datetime.date(next_year, next_month, 1) - datetime.timedelta(days=1)
     else:
-        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-    sucursales = models.Codigo_oficina.objects.all()
-    cod_sucursales = {i.terminal: i.codigo for i in sucursales}
-    codigo_sucursal = cod_sucursales[sucursal] 
-    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=codigo_sucursal)
-    transacciones_data = []
-    total_datos = 0
-    for t in transacciones:
-            transacciones_data.append({
-                'establecimiento': t.establecimiento,
-                'codigo_aval': t.codigo_aval,
-                'codigo_incocredito': t.codigo_incocredito,
-                'terminal': t.terminal,
-                'fecha': t.fecha.strftime('%d/%m/%Y'),
-                'hora': t.hora,
-                'nombre_convenio': t.nombre_convenio,
-                'operacion': t.operacion,
-                'fact_cta': t.fact_cta,
-                'cod_aut': t.cod_aut,
-                'valor': t.valor,
-                'nura': t.nura,
-                'esquema': t.esquema,
-                'numero_tarjeta': t.numero_tarjeta,
-                'comision': t.comision,
-            })
-            total_datos = total_datos + t.valor
-    return Response({'total': f"${total_datos:,.2f}", 'sucursal': sucursal})
+        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d').date()
+        fecha_fin = fecha_inicio
+
+    try:
+        sucursal_obj = models.Codigo_oficina.objects.get(terminal=sucursal_terminal)
+        codigo_sucursal = sucursal_obj.codigo
+    except models.Codigo_oficina.DoesNotExist:
+        return Response({'error': f'Código para sucursal {sucursal_terminal} no encontrado'}, status=404)
+
+    transacciones = models.Transacciones_sucursal.objects.filter(
+        fecha__range=(fecha_inicio, fecha_fin), 
+        codigo_incocredito=codigo_sucursal
+    )
+    
+    total_datos = transacciones.aggregate(Sum('valor'))['valor__sum'] or 0
+
+    return Response({'total': total_datos, 'sucursal': sucursal_terminal})
 
 
 @api_view(['POST'])
@@ -2094,84 +2067,67 @@ def translate_prepago(requests):
 @api_view(['POST'])
 def lista_productos_prepago_equipo(request):
     try:
+        # ... (lógica inicial sin cambios)
         precio = request.data['precio']
         equipo = request.data['equipo']
-
-        qs = models.Lista_precio.objects.filter(
-            producto=equipo,
-            nombre=precio
-        ).order_by('-dia') 
+        qs = models.Lista_precio.objects.filter(producto=equipo, nombre=precio).order_by('-dia')
         if not qs.exists():
             return Response({'data': []})
-
-       
+        
         df = pd.DataFrame(list(qs.values()))
-
         df.rename(columns={'valor': 'valor_actual'}, inplace=True)
         df['valor_anterior'] = df['valor_actual'].shift(-1)
+
+        # AHORA: La columna 'variation' contendrá un diccionario
         df['variation'] = df.apply(calcular_variacion, axis=1)
 
         new_data = []
         for _, row in df.iterrows():
+            variacion_data = row.get('variation') # Obtenemos el diccionario
             tem_data = {
                 'equipo': row.get('producto'),
-                'valor sin iva': f"${float(row.get('valor_actual', 0)):,.0f}", 
+                'valor sin iva': float(row.get('valor_actual', 0)),
                 'fecha': row.get('dia'),
-                'variation': row.get('variation', 'neutral') 
+                # AHORA: Descomponemos el resultado en campos separados
+                'indicador': variacion_data.get('indicador'),
+                'diferencial': variacion_data.get('diferencial'),
+                'porcentaje': variacion_data.get('porcentaje')
             }
             new_data.append(tem_data)
         
         return Response({'data': new_data})
-
     except Exception as e:
         print(f"ERROR en /lista-productos-prepago-equipo: {str(e)}")
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
 
-# views.py
 
 def calcular_variacion(row):
     valor_anterior_raw = row.get('valor_anterior')
 
-    # Si no hay valor anterior, es neutral
     if pd.isna(valor_anterior_raw):
-        return 'neutral'
+        return {'indicador': 'neutral', 'diferencial': 0, 'porcentaje': 0}
 
-    # Aseguramos que ambos valores sean numéricos (float) para evitar errores
     valor_actual = float(row.get('valor_actual', 0))
     valor_anterior = float(valor_anterior_raw)
 
-    # Si los valores son iguales, es neutral
     if valor_actual == valor_anterior:
-        return 'neutral'
+        return {'indicador': 'neutral', 'diferencial': 0, 'porcentaje': 0}
 
     elif valor_actual > valor_anterior:
         dif = valor_actual - valor_anterior
-        # --- CÁLCULO CORREGIDO ---
-        # Aseguramos que el denominador sea el valor_anterior
-        if valor_anterior > 0:
-            percentage = (dif / valor_anterior) * 100
-        else:
-            percentage = 100.0 # Si el anterior era 0, el cambio es del 100%
-        
-        percentage_str = f'{round(percentage, 2)}%'
-        return f'up-{dif}-{percentage_str}'
+        percentage = (dif / valor_anterior) * 100 if valor_anterior > 0 else 100.0
+        return {'indicador': 'up', 'diferencial': dif, 'porcentaje': round(percentage, 2)}
 
     elif valor_actual < valor_anterior:
         dif = valor_anterior - valor_actual
-        # --- CÁLCULO CORREGIDO ---
-        # Aseguramos que el denominador sea el valor_anterior
-        if valor_anterior > 0:
-            percentage = (dif / valor_anterior) * 100
-        else:
-            percentage = 0 # No se puede calcular el cambio desde 0
-        
-        percentage_str = f'{round(percentage, 2)}%'
-        return f'down-{dif}-{percentage_str}'
+        percentage = (dif / valor_anterior) * 100 if valor_anterior > 0 else 0
+        return {'indicador': 'down', 'diferencial': dif, 'porcentaje': round(percentage, 2)}
 # views.py 
 
 @api_view(['GET', 'POST'])
 def lista_productos_prepago(request):
     if request.method == 'GET':
+        # ... (La lógica del GET no cambia)
         try:
             auth_header = request.headers.get('Authorization')
             if not auth_header or not auth_header.startswith('Bearer '):
@@ -2200,48 +2156,29 @@ def lista_productos_prepago(request):
         except Exception as e:
             return Response({'detail': f'Error en GET: {str(e)}'}, status=500)
 
-
-    # --- BLOQUE POST TOTALMENTE REFACTORIZADO ---
     elif request.method == 'POST':
         try:
+            # ... (Lógica inicial de DataFrames sin cambios hasta el final)
             precio = request.data.get('precio')
-            if not precio:
-                return Response({'error': 'El campo "precio" es obligatorio'}, status=400)
-
+            if not precio: return Response({'error': 'El campo "precio" es obligatorio'}, status=400)
             data = models.Lista_precio.objects.all()
-            if not data.exists():
-                return Response({'data': []})
-            
+            if not data.exists(): return Response({'data': []})
             df = pd.DataFrame(list(data.values()))
-
-            # 1. Filtramos solo por la lista de precios seleccionada
             df_precio = df[df['nombre'] == precio].copy()
-            df_precio['dia'] = pd.to_datetime(df_precio['dia']) # Aseguramos que 'dia' sea de tipo fecha
-
-            # 2. Ordenamos por producto y luego por fecha (la más reciente primero)
+            df_precio['dia'] = pd.to_datetime(df_precio['dia'])
             df_sorted = df_precio.sort_values(['producto', 'dia'], ascending=[True, False])
-
-            # 3. Creamos la columna 'valor_anterior' usando shift()
-            # Esto toma el valor de la fila de abajo (la anterior en el tiempo) y lo pone en la fila actual
             df_sorted['valor_anterior'] = df_sorted.groupby('producto')['valor'].shift(-1)
-            
-            # Renombramos 'valor' para claridad en la función 'calcular_variacion'
             df_sorted.rename(columns={'valor': 'valor_actual'}, inplace=True)
 
-            # 4. Calculamos la variación directamente
+            # AHORA: La columna 'variation' contendrá un diccionario
             df_sorted['variation'] = df_sorted.apply(calcular_variacion, axis=1)
-
-            # 5. Nos quedamos solo con el registro más reciente de cada producto
             df_resultado = df_sorted.drop_duplicates('producto', keep='first').reset_index(drop=True)
             
-            # --- El resto de la lógica para añadir columnas y formatear la salida ---
             df_costo = df[df['nombre'] == 'Costo'].sort_values('dia', ascending=False).drop_duplicates('producto')[['producto', 'valor']].rename(columns={'valor': 'costo'})
             df_descuento = df[df['nombre'] == 'descuento'].sort_values('dia', ascending=False).drop_duplicates('producto')[['producto', 'valor']].rename(columns={'valor': 'descuento'})
-
             df_resultado = pd.merge(df_resultado, df_costo, on='producto', how='left')
             df_resultado = pd.merge(df_resultado, df_descuento, on='producto', how='left')
             df_resultado.fillna({'costo': 0, 'descuento': 0}, inplace=True)
-
             sim = 2000
             base = 1095578
             new_data = []
@@ -2249,48 +2186,42 @@ def lista_productos_prepago(request):
             for _, row in df_resultado.iterrows():
                 costo_val = float(row.get('costo', 0))
                 descuento_val = float(row.get('descuento', 0))
-                valor_val = float(row.get('valor_actual', 0)) # Usamos 'valor_actual'
+                valor_val = float(row.get('valor_actual', 0))
+                variacion_data = row.get('variation') # Obtenemos el diccionario
 
                 if precio == 'Costo':
                     tem_data = {
-                        'equipo': row.get('producto'),
-                        'costo': f"${costo_val:,.2f}",
-                        'descuento': f"${descuento_val:,.2f}",
-                        'total': f"${costo_val - descuento_val:,.2f}",
-                        'variation': row.get('variation')
+                        'equipo': row.get('producto'), 'costo': costo_val, 'descuento': descuento_val,
+                        'total': costo_val - descuento_val,
+                        # AHORA: Campos separados
+                        'indicador': variacion_data.get('indicador'),
+                        'diferencial': variacion_data.get('diferencial'),
+                        'porcentaje': variacion_data.get('porcentaje'),
                     }
                 else:
                     iva = valor_val * 0.19 if valor_val >= base else 0
                     total = sim * 1.19 + valor_val + iva
                     tem_data = {
-                        'equipo': row.get('producto'),
-                        'precio simcard': f"${sim:,.2f}",
-                        'IVA simcard': f"${sim * 0.19:,.2f}",
-                        'equipo sin IVA': f"${valor_val:,.2f}",
-                        'IVA equipo': f"${iva:,.2f}",
-                        'variation': row.get('variation')
+                        'equipo': row.get('producto'), 'precio simcard': sim,
+                        'IVA simcard': sim * 0.19, 'equipo sin IVA': valor_val, 'IVA equipo': iva,
+                        # AHORA: Campos separados
+                        'indicador': variacion_data.get('indicador'),
+                        'diferencial': variacion_data.get('diferencial'),
+                        'porcentaje': variacion_data.get('porcentaje'),
                     }
-
-                    kit_map = {
-                        'Precio sub': 'kit sub', 'Precio Fintech': 'kit fintech',
-                        'Precio Addi': 'kit addi', 'Precio Adelantos Valle': 'kit valle',
-                    }
+                    kit_map = { 'Precio sub': 'kit sub', 'Precio Fintech': 'kit fintech', 'Precio Addi': 'kit addi', 'Precio Adelantos Valle': 'kit valle', }
                     kit_col = kit_map.get(precio)
                     if kit_col:
                         kit_val = float(row.get(kit_col, 0))
                         tem_data['KIT'] = kit_val
                         total += kit_val
-                    
-                    tem_data['total'] = f"${total:,.2f}"
-                    if precio == 'Precio publico' and descuento_val > 0:
-                        tem_data['Promo'] = 'PROMO'
+                    tem_data['total'] = total
+                    if precio == 'Precio publico' and descuento_val > 0: tem_data['Promo'] = 'PROMO'
                 
                 new_data.append(tem_data)
 
             return Response({'data': new_data})
-
         except Exception as e:
-            # Añadimos un print en el servidor para facilitar la depuración futura
             print(f"ERROR EN POST /lista-productos-prepago: {str(e)}")
             return Response({'error': f'Error interno en la petición POST: {str(e)}'}, status=500)
 
